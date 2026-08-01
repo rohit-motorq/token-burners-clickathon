@@ -242,6 +242,97 @@ no shared session to serve images from without more machinery).
 
 ---
 
+## Chart styling follows the dataviz skill, scoped to what applies to a static PNG
+
+**Decision:** `chart.py`'s `_plot` uses the dataviz skill's validated
+light-mode palette (`references/palette.md`) and mark specs
+(`references/marks-and-anatomy.md`) — single-hue series line, hairline
+recessive gridlines, ink-toned (never colored) text, a direct label at the
+peak instead of a marker on every point, thinned x-axis ticks, a
+non-negative y-floor for a count that can't go below zero.
+
+**Why scoped, not the full procedure:** the skill's method assumes an
+interactive HTML/SVG chart — hover tooltips, a theme toggle validated
+against both surfaces, legends for multi-series. This chart is a plain
+`<img>` (a static PNG, served over HTTP — see the entry above on why not a
+`data:` URI), so steps 5 (hover layer) and the dark-mode half of step 6
+don't apply; there's no interaction layer and no runtime to detect the
+viewer's theme. Single series also means no legend (`marks-and-anatomy.md`:
+"a single series needs no legend box — the title already says what is
+plotted") and no CVD-adjacency concern worth running the validator over
+(only one hue in play).
+
+**Concrete fixes this made over the original bare-matplotlib version**
+(verified by rendering the same real ANDROID_PHONE curve before/after):
+default `markersize=2` on every point read as visual noise — replaced with
+one direct label at the peak; dense per-minute x-axis labels (60 for a
+last-hour view) overlapped — thinned to ~8 evenly-spaced ticks; default
+matplotlib chrome (boxed axes, default rainbow-adjacent blue, no
+comma-formatting) replaced with the validated surface/ink/gridline/series-1
+slots and clean thousands-formatted y-ticks; the peak label initially
+collided with the chart title — fixed with `ax.margins(y=0.2)` for headroom;
+first version implied negative concurrency was possible — clamped
+`ylim(bottom=0)` when all values are non-negative.
+
+---
+
+## Why Roboto is vendored as actual font files, not just set as a font-family name
+
+**Decision:** `src/agent/assets/fonts/Roboto-{Regular,Medium,Bold}.ttf` are
+committed to the repo; `chart.py`'s `_ensure_roboto()` registers them with
+matplotlib's font manager at first chart render and sets
+`rcParams["font.family"] = "Roboto"`.
+
+**Why not just set the font name and hope it resolves:** matplotlib falls
+back silently to DejaVu Sans if the named font isn't actually
+installed/registered — no error, no warning, just the wrong font, which
+would have been invisible without specifically checking `rcParams` after
+the fact. Roboto isn't a font macOS ships with by default, so setting the
+name alone does nothing on a fresh checkout.
+
+**Why vendor actual files instead of referencing wherever they happen to
+exist locally:** the only Roboto TTFs found on this machine during
+development were bundled inside a Chrome extension's install directory —
+works today, but breaks the moment that extension updates or on literally
+any other laptop following `README.md`'s setup steps. Copied the files into
+the repo itself instead, so `scripts/setup.sh` works portably with no
+Roboto-specific step at all — it's just there. Roboto is Apache 2.0
+licensed (Google's own open-source Android/Material font), freely
+redistributable.
+
+**Why lazy registration, not at module import time:** `chart.py` is
+imported by both `agent.py` (which renders charts) and indirectly by things
+that never render one (e.g. `mcp_server`'s tool discovery does a bare
+import of `src.agent.tools`). Registering fonts and importing
+`matplotlib.font_manager` eagerly would pay that cost on every import;
+`_ensure_roboto()` only pays it the first time a chart actually renders,
+guarded by a module-level flag.
+
+---
+
+## Why red/green mark the end-point, not the whole line
+
+**Decision:** given a custom 4-color brand palette (blue `#54a0ff`, red
+`#ff6b6b`, grey `#c8d6e5`, green `#1dd1a1`), blue stays the line's identity
+color always; red/green only color a small triangle marker + label at the
+series' last point, green if rising (last ≥ first), red if falling.
+
+**Why not recolor the whole line red/green by direction:** would break
+series identity — the same content_id's concurrency curve would be a
+different color depending on which 10-minute window you asked about,
+which reads as two different things being plotted, not one. Per
+`marks-and-anatomy.md`: color follows the entity, not its direction/rank;
+status colors (red/green here) ship as an icon + label, layered on top of
+the identity color, never replacing it.
+
+**Why a marker shape, not a unicode arrow character:** tried `▲`/`▼` first —
+Roboto (see the vendoring entry above) doesn't have those glyphs, matplotlib
+warned and rendered a missing-glyph box. Switched to native matplotlib
+triangle markers (`marker="^"`/`"v"`), which render identically regardless
+of font glyph coverage.
+
+---
+
 ## Why `mcp` is pinned `<2.0` in `src/mcp_server/requirements.txt`
 
 **Decision:** pinned, not left open-ended.
