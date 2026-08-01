@@ -1,0 +1,352 @@
+[
+  {
+    "range_name": "quiet_pre_event",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785056400000,
+    "end_ts_ms": 1785058200000,
+    "filters": {},
+    "peak_concurrency": 39,
+    "avg_concurrency": 30.098,
+    "distinct_active_sessions": 82,
+    "distinct_active_users": 73
+  },
+  {
+    "range_name": "quiet_pre_event",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785056400000,
+    "end_ts_ms": 1785058200000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 36,
+    "avg_concurrency": 27.93,
+    "distinct_active_sessions": 74,
+    "distinct_active_users": 67
+  },
+  {
+    "range_name": "quiet_pre_event",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785056400000,
+    "end_ts_ms": 1785058200000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 3,
+    "avg_concurrency": 1.433,
+    "distinct_active_sessions": 5,
+    "distinct_active_users": 3
+  },
+  {
+    "range_name": "quiet_pre_event",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785056400000,
+    "end_ts_ms": 1785058200000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  },
+  {
+    "range_name": "ramp_up",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785061800000,
+    "end_ts_ms": 1785062400000,
+    "filters": {},
+    "peak_concurrency": 1484,
+    "avg_concurrency": 826.591,
+    "distinct_active_sessions": 2452,
+    "distinct_active_users": 2335
+  },
+  {
+    "range_name": "ramp_up",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785061800000,
+    "end_ts_ms": 1785062400000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 927,
+    "avg_concurrency": 529.571,
+    "distinct_active_sessions": 1480,
+    "distinct_active_users": 1450
+  },
+  {
+    "range_name": "ramp_up",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785061800000,
+    "end_ts_ms": 1785062400000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 204,
+    "avg_concurrency": 107.529,
+    "distinct_active_sessions": 350,
+    "distinct_active_users": 335
+  },
+  {
+    "range_name": "ramp_up",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785061800000,
+    "end_ts_ms": 1785062400000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  },
+  {
+    "range_name": "sustained_peak",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785062820000,
+    "end_ts_ms": 1785064020000,
+    "filters": {},
+    "peak_concurrency": 2298,
+    "avg_concurrency": 2168.69,
+    "distinct_active_sessions": 6516,
+    "distinct_active_users": 6026
+  },
+  {
+    "range_name": "sustained_peak",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785062820000,
+    "end_ts_ms": 1785064020000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 1457,
+    "avg_concurrency": 1366.916,
+    "distinct_active_sessions": 3919,
+    "distinct_active_users": 3744
+  },
+  {
+    "range_name": "sustained_peak",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785062820000,
+    "end_ts_ms": 1785064020000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 263,
+    "avg_concurrency": 237.318,
+    "distinct_active_sessions": 892,
+    "distinct_active_users": 793
+  },
+  {
+    "range_name": "sustained_peak",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785062820000,
+    "end_ts_ms": 1785064020000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  },
+  {
+    "range_name": "single_peak_minute",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785063300000,
+    "end_ts_ms": 1785063360000,
+    "filters": {},
+    "peak_concurrency": 2297,
+    "avg_concurrency": 2280.512,
+    "distinct_active_sessions": 2676,
+    "distinct_active_users": 2604
+  },
+  {
+    "range_name": "single_peak_minute",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785063300000,
+    "end_ts_ms": 1785063360000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 1457,
+    "avg_concurrency": 1445.93,
+    "distinct_active_sessions": 1681,
+    "distinct_active_users": 1672
+  },
+  {
+    "range_name": "single_peak_minute",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785063300000,
+    "end_ts_ms": 1785063360000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 263,
+    "avg_concurrency": 253.151,
+    "distinct_active_sessions": 331,
+    "distinct_active_users": 328
+  },
+  {
+    "range_name": "single_peak_minute",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785063300000,
+    "end_ts_ms": 1785063360000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  },
+  {
+    "range_name": "ramp_down",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785064200000,
+    "end_ts_ms": 1785065400000,
+    "filters": {},
+    "peak_concurrency": 1910,
+    "avg_concurrency": 1087.225,
+    "distinct_active_sessions": 4426,
+    "distinct_active_users": 4166
+  },
+  {
+    "range_name": "ramp_down",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785064200000,
+    "end_ts_ms": 1785065400000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 1198,
+    "avg_concurrency": 685.777,
+    "distinct_active_sessions": 2696,
+    "distinct_active_users": 2630
+  },
+  {
+    "range_name": "ramp_down",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785064200000,
+    "end_ts_ms": 1785065400000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 211,
+    "avg_concurrency": 119.953,
+    "distinct_active_sessions": 592,
+    "distinct_active_users": 549
+  },
+  {
+    "range_name": "ramp_down",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785064200000,
+    "end_ts_ms": 1785065400000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  },
+  {
+    "range_name": "full_event_hour",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785060000000,
+    "end_ts_ms": 1785063600000,
+    "filters": {},
+    "peak_concurrency": 2298,
+    "avg_concurrency": 854.406,
+    "distinct_active_sessions": 6754,
+    "distinct_active_users": 6236
+  },
+  {
+    "range_name": "full_event_hour",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785060000000,
+    "end_ts_ms": 1785063600000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 1457,
+    "avg_concurrency": 551.872,
+    "distinct_active_sessions": 3994,
+    "distinct_active_users": 3802
+  },
+  {
+    "range_name": "full_event_hour",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785060000000,
+    "end_ts_ms": 1785063600000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 263,
+    "avg_concurrency": 97.281,
+    "distinct_active_sessions": 958,
+    "distinct_active_users": 855
+  },
+  {
+    "range_name": "full_event_hour",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785060000000,
+    "end_ts_ms": 1785063600000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  },
+  {
+    "range_name": "full_event_day",
+    "filter_name": "no_filter",
+    "start_ts_ms": 1785024000000,
+    "end_ts_ms": 1785110400000,
+    "filters": {},
+    "peak_concurrency": 2298,
+    "avg_concurrency": 69.576,
+    "distinct_active_sessions": 10502,
+    "distinct_active_users": 9331
+  },
+  {
+    "range_name": "full_event_day",
+    "filter_name": "platform_android_phone",
+    "start_ts_ms": 1785024000000,
+    "end_ts_ms": 1785110400000,
+    "filters": {
+      "platform": "ANDROID_PHONE"
+    },
+    "peak_concurrency": 1457,
+    "avg_concurrency": 45.702,
+    "distinct_active_sessions": 6270,
+    "distinct_active_users": 5745
+  },
+  {
+    "range_name": "full_event_day",
+    "filter_name": "platform_iphone",
+    "start_ts_ms": 1785024000000,
+    "end_ts_ms": 1785110400000,
+    "filters": {
+      "platform": "IPHONE"
+    },
+    "peak_concurrency": 263,
+    "avg_concurrency": 7.51,
+    "distinct_active_sessions": 1485,
+    "distinct_active_users": 1249
+  },
+  {
+    "range_name": "full_event_day",
+    "filter_name": "video_type_live",
+    "start_ts_ms": 1785024000000,
+    "end_ts_ms": 1785110400000,
+    "filters": {
+      "video_type": "Live"
+    },
+    "peak_concurrency": 0,
+    "avg_concurrency": 0.0,
+    "distinct_active_sessions": 0,
+    "distinct_active_users": 0
+  }
+]
