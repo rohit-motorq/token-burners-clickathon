@@ -42,7 +42,7 @@
     "start_ts_ms": 1785056400000,
     "end_ts_ms": 1785058200000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
     "peak_concurrency": 0,
     "avg_concurrency": 0.0,
@@ -92,12 +92,12 @@
     "start_ts_ms": 1785061800000,
     "end_ts_ms": 1785062400000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
-    "peak_concurrency": 0,
-    "avg_concurrency": 0.0,
-    "distinct_active_sessions": 0,
-    "distinct_active_users": 0
+    "peak_concurrency": 310,
+    "avg_concurrency": 169.262,
+    "distinct_active_sessions": 489,
+    "distinct_active_users": 479
   },
   {
     "range_name": "sustained_peak",
@@ -142,12 +142,12 @@
     "start_ts_ms": 1785062820000,
     "end_ts_ms": 1785064020000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
-    "peak_concurrency": 0,
-    "avg_concurrency": 0.0,
-    "distinct_active_sessions": 0,
-    "distinct_active_users": 0
+    "peak_concurrency": 332,
+    "avg_concurrency": 264.417,
+    "distinct_active_sessions": 1432,
+    "distinct_active_users": 1362
   },
   {
     "range_name": "single_peak_minute",
@@ -192,12 +192,12 @@
     "start_ts_ms": 1785063300000,
     "end_ts_ms": 1785063360000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
-    "peak_concurrency": 0,
-    "avg_concurrency": 0.0,
-    "distinct_active_sessions": 0,
-    "distinct_active_users": 0
+    "peak_concurrency": 322,
+    "avg_concurrency": 315.056,
+    "distinct_active_sessions": 389,
+    "distinct_active_users": 388
   },
   {
     "range_name": "ramp_down",
@@ -242,12 +242,12 @@
     "start_ts_ms": 1785064200000,
     "end_ts_ms": 1785065400000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
-    "peak_concurrency": 0,
-    "avg_concurrency": 0.0,
-    "distinct_active_sessions": 0,
-    "distinct_active_users": 0
+    "peak_concurrency": 205,
+    "avg_concurrency": 132.828,
+    "distinct_active_sessions": 1069,
+    "distinct_active_users": 1021
   },
   {
     "range_name": "full_event_hour",
@@ -292,12 +292,12 @@
     "start_ts_ms": 1785060000000,
     "end_ts_ms": 1785063600000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
-    "peak_concurrency": 0,
-    "avg_concurrency": 0.0,
-    "distinct_active_sessions": 0,
-    "distinct_active_users": 0
+    "peak_concurrency": 356,
+    "avg_concurrency": 131.496,
+    "distinct_active_sessions": 1417,
+    "distinct_active_users": 1355
   },
   {
     "range_name": "full_event_day",
@@ -342,11 +342,11 @@
     "start_ts_ms": 1785024000000,
     "end_ts_ms": 1785110400000,
     "filters": {
-      "video_type": "Live"
+      "video_type": "live"
     },
-    "peak_concurrency": 0,
-    "avg_concurrency": 0.0,
-    "distinct_active_sessions": 0,
-    "distinct_active_users": 0
+    "peak_concurrency": 356,
+    "avg_concurrency": 8.73,
+    "distinct_active_sessions": 2643,
+    "distinct_active_users": 2455
   }
 ]

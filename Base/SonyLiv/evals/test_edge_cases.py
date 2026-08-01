@@ -22,9 +22,18 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
                                                       build here — not duplicated in this file
   2  inactive->inactive dup transitions              same as #1 — test_ledger.py
   3  Events after SessionEnd                         test_ec3_10_23_terminal_absorbs_late_events
+                                                      — PERMANENT SKIP in v2: session_runs (the
+                                                      audit ledger this relied on) is dropped,
+                                                      no replacement exists
   4  AppForegrounded alone doesn't activate           test_ec4_appforegrounded_alone_no_activation
+                                                      — PERMANENT SKIP in v2: session_runs dropped;
+                                                      guaranteed structurally by 008_delta_fold.sql's
+                                                      activation_ts CTE instead, not queryable
   5  Sparse delta table needs dense read              test_ec5_gap_minute_concurrency_correct
+                                                      (now reads cc_delta_content)
   6  Heartbeats fire while backgrounded               test_ec6_si_phantom_audience_exists
+                                                      — PERMANENT SKIP in v2: needs both
+                                                      cc_si_minute and session_runs, both dropped
   7  Pause hidden inside VideoHeartbeat               parsing already exercised by every test
                                                       that filters on (event_type, event); see
                                                       data_expectations.py "resume heartbeats"
@@ -33,19 +42,22 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
                                                       declares "mean over occupied minutes";
                                                       nothing to assert beyond peak/avg golden
                                                       match already covered elsewhere
-  10 VideoError terminality                           test_ec10_videoerror_sets_ended +
-                                                      test_ec3_10_23_terminal_absorbs_late_events
-                                                      (confirmed terminal/absorbing by the team —
-                                                      see reconciliation note below)
-  11 audio_language drift                             not a session_state dimension (LLD pins
+  10 VideoError terminality                           test_ec10_videoerror_sets_ended (rewritten
+                                                      against session_active — see v2
+                                                      reconciliation note below; no longer claims
+                                                      VideoError itself is terminal, only that it
+                                                      eventually correlates with is_active=0)
+  11 audio_language drift                             not a session_active dimension (v2 pins
                                                       platform/country/video_type/category
                                                       only) — N/A to the serving-layer design
   12 subtitle_language drift                          same as #11 — N/A
   13 Shared sessions (2 user_ids)                      test_ec11_13_25_dimension_pinning
-                                                      (user_id pinning folded into same check)
+                                                      (rewritten against session_active — see
+                                                      function docstring for the weaker v2 claim)
   14 301-session bot user                              informational only, no correctness
                                                       impact per doc — not tested
   15 Mismatched BG/FG counts                           test_ec15_mismatched_bgfg_closes_via_timeout
+                                                      (rewritten against session_active is_active)
   16 Duplicate raw events                              data_expectations.py (evidence) +
                                                       test_ledger.py (per-session count match)
   17 Foreground default assumed pre-Play               fg=1 is a column DEFAULT (test_schema.py
@@ -53,27 +65,34 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
                                                       isolable without per-event replay — skip
   18 Sessions crossing day boundary                    test_ec18_day_boundary_single_partition
   19 43-hour marathon session                          test_ec19_marathon_session_capped
+                                                      — PERMANENT SKIP in v2: session_runs dropped,
+                                                      no per-run duration data exists at all
   20 Zero/near-zero-duration sessions                  test_ec20_near_zero_duration_sessions_short_runs
+                                                      — PERMANENT SKIP in v2: same as #19
   21 Duplicate Start/Play/End                           test_ledger.py per-session run count
                                                       vs reference already exercises this
   22 Out-of-order events (0 true OOO)                  data_expectations.py "events never out
                                                       of order"
-  23 Late arrivals after SessionEnd                    test_ec3_23_terminal_absorbs_late_events
+  23 Late arrivals after SessionEnd                    test_ec3_10_23_terminal_absorbs_late_events
+                                                      — PERMANENT SKIP in v2, same as #3
   24 Multi-platform users                              informational only — not tested
   25 content_id switch mid-session                     test_ec11_13_25_dimension_pinning
+                                                      (rewritten against session_active, see #13)
 
-Reconciliation note — #10, VideoError terminality:
-Neither design doc matches the actual pipeline behavior. EDGE_CASES.md's state
-machine (§3.1) has VideoError go ACTIVE -> INACTIVE, explicitly "NOT terminal —
-55 sessions continue." LLD-sam.md's §3.1 event catalog gives VideoError NO
-switch effect at all (dash for fg/playing/ended). Confirmed with the team:
-the actual rule is a third position — VideoError IS terminal/absorbing, same
-as VideoSessionEnd (sets ended=1, session closed for good). Tested as such
-below. 293 sessions in ch_hackathon_raw_data raise VideoError; all 293
-eventually also carry a VideoSessionEnd (consistent with absorbing: a later
-duplicate End is a no-op, same as EC3's "multiple VideoSessionEnd" case).
-LLD-sam.md and EDGE_CASES.md should both be updated to match this decision —
-flagging for the team, not silently patching the design docs here.
+Reconciliation note — #10, VideoError terminality (v2 finding):
+Checked directly against src/migrationv2/migrations/008_delta_fold.sql (the
+live fold logic): VideoError is NOT specially handled anywhere in the fold
+(grepped the migration, no match) — only VideoSessionEnd is a hard-end
+trigger. A VideoError-only session (no VideoSessionEnd) would only close via
+the 90s staleness sweep, not immediately, and there's no `ended` column
+anymore, only `is_active`. So v2 does not make VideoError terminal by design
+the way the old LLD-based reconciliation assumed — it happens to look
+terminal in practice only because (per data_expectations.py) essentially all
+VideoError sessions also carry a real VideoSessionEnd, which is what
+actually closes them. test_ec10_videoerror_sets_ended checks that weaker,
+actually-true claim (eventually is_active=0), not "VideoError is terminal."
+Worth flagging to the team as a design note if VideoError should get
+explicit fold handling.
 """
 import datetime
 import json
@@ -81,8 +100,8 @@ import sys
 
 from ch_client import query, scalar, table_ready
 from table_names import (
-    RAW_EVENTS, CONTENT_DIM, SESSION_STATE, SESSION_RUNS,
-    CC_DELTA_DIMS, CC_SI_MINUTE, EVENTS_RAW_IMPL,
+    RAW_EVENTS, CONTENT_DIM, SESSION_ACTIVE,
+    CC_DELTA_CONTENT, EVENTS_RAW_IMPL,
 )
 
 RESULTS = {"pass": 0, "fail": 0, "skip": 0}
@@ -114,7 +133,11 @@ def load_golden(range_name, filter_name):
 
 def test_ec0_flapping_no_overcount():
     name = "EC0: minute-grain running-sum peak avoids the naive-delta flapping overcount"
-    missing = [] if table_ready(CC_DELTA_DIMS) else [CC_DELTA_DIMS]
+    # ponytail: RAW_EVENTS wasn't gated here before either — this query needs it
+    # unconditionally, so check it alongside CC_DELTA_CONTENT to avoid crashing when
+    # the raw seed table isn't loaded in this environment (pre-existing gap, not a
+    # v2-migration regression).
+    missing = [n for n in (CC_DELTA_CONTENT, RAW_EVENTS) if not table_ready(n)]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
@@ -141,7 +164,7 @@ def test_ec0_flapping_no_overcount():
     impl_peak = scalar(f"""
         SELECT max(cc) FROM (
             SELECT sum(d) OVER (ORDER BY minute) AS cc
-            FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS}
+            FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_CONTENT}
                   WHERE toDate(minute) = '2026-07-26' GROUP BY minute)
         )
     """)
@@ -171,49 +194,46 @@ def test_ec0_flapping_no_overcount():
 # ---------------------------------------------------------------------------
 
 def test_ec3_10_23_terminal_absorbs_late_events():
+    """session_runs (the per-session run_start/run_end audit ledger) is
+    dropped in v2 with no replacement — v2's session_active only carries
+    current is_active state, not historical run boundaries. "does no run
+    start/extend after the terminal event" cannot be independently
+    re-verified from session_active's current-state-only design. Permanently
+    skipped — flag to the team as a coverage gap, same spirit as this file's
+    EC17/EC24 "informational only, not tested" convention."""
     name = "EC3/EC10/EC23: no session_runs row starts or extends after a session's first VideoSessionEnd/VideoError"
-    missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    # session_runs.run_start/run_end are DateTime('UTC') per LLD §2.7 — second
-    # precision, NOT DateTime64. Compare in seconds, not toUnixTimestamp64Milli
-    # (which requires DateTime64 and would error against this column type).
-    n = scalar(f"""
-        WITH terminals AS (
-            SELECT video_session_id AS sid, min(event_timestamp) AS term_ts
-            FROM {RAW_EVENTS} WHERE event_type IN ('VideoSessionEnd', 'VideoError')
-            GROUP BY sid
-        )
-        SELECT count() FROM {SESSION_RUNS} r
-        JOIN terminals t ON r.video_session_id = t.sid
-        WHERE toUnixTimestamp(r.run_start) > toInt64(t.term_ts / 1000) + 1
-           OR toUnixTimestamp(r.run_end)   > toInt64(t.term_ts / 1000) + 1
-    """)
-    if n:
-        report("fail", name, f"{n} session_runs rows extend past the first terminal event (+1s slack)")
-    else:
-        report("pass", name)
+    report("skip", name, "session_runs removed in v2 design (no audit ledger table) — permanently skipped")
 
 
 def test_ec10_videoerror_sets_ended():
-    name = "EC10: every session that ever raises VideoError ends up with ended=1 (VideoError is terminal)"
-    missing = [] if table_ready(SESSION_STATE) else [SESSION_STATE]
+    """v2 design note: 008_delta_fold.sql's fold logic has no explicit
+    VideoError handling at all (grepped the migration — no match) — only
+    VideoSessionEnd is a hard-end trigger. A VideoError-only session (no
+    VideoSessionEnd) would only close via the 90s staleness sweep, not
+    immediately. There's also no `ended` column anymore, only `is_active`.
+    So this test now checks the weaker, actually-true-in-v2 claim: every
+    session that raised VideoError eventually shows is_active=0 in
+    session_active — which holds in practice because (per
+    data_expectations.py) essentially all VideoError sessions also carry a
+    real VideoSessionEnd, not because v2 treats VideoError as terminal
+    itself."""
+    name = "EC10 (v2): every session that ever raises VideoError eventually has is_active=0 in session_active"
+    missing = [n for n in (SESSION_ACTIVE, RAW_EVENTS) if not table_ready(n)]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
     n = scalar(f"""
         SELECT count() FROM (
-            SELECT video_session_id, argMax(ended, ver) AS ended
-            FROM {SESSION_STATE} GROUP BY video_session_id
+            SELECT video_session_id, argMax(is_active, version) AS is_active
+            FROM {SESSION_ACTIVE} GROUP BY video_session_id
         ) s
         WHERE s.video_session_id IN (
             SELECT video_session_id FROM {RAW_EVENTS} WHERE event_type = 'VideoError'
         )
-        AND s.ended != 1
+        AND s.is_active != 0
     """)
     if n:
-        report("fail", name, f"{n} sessions with a VideoError are not marked ended=1")
+        report("fail", name, f"{n} sessions with a VideoError are still is_active=1")
     else:
         report("pass", name)
 
@@ -223,31 +243,17 @@ def test_ec10_videoerror_sets_ended():
 # ---------------------------------------------------------------------------
 
 def test_ec4_appforegrounded_alone_no_activation():
+    """session_runs (the per-session run audit ledger) is dropped in v2 with
+    no replacement, so this can no longer be independently verified via a
+    queryable ledger. v2's fold (008_delta_fold.sql, the `activation_ts`
+    CTE) structurally guarantees this already: activation only fires on
+    `event_type = 'VideoPlay' OR (VideoHeartbeat AND event IN ('play',
+    'resume'))` — AppForegrounded is never in that condition. Permanently
+    skipped, only assertable by reading the SQL itself — same coverage-gap
+    treatment as EC3/EC10/EC23."""
     name = "EC4: AppForegrounded events occurring before a session's first VideoPlay never open a run"
-    missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    n = scalar(f"""
-        WITH fg_before_play AS (
-            SELECT r.video_session_id AS sid, r.event_timestamp AS fg_ts
-            FROM {RAW_EVENTS} r
-            LEFT JOIN (
-                SELECT video_session_id AS sid2, min(event_timestamp) AS play_ts
-                FROM {RAW_EVENTS} WHERE event_type = 'VideoPlay'
-                GROUP BY sid2
-            ) p ON r.video_session_id = p.sid2
-            WHERE r.event_type = 'AppForegrounded'
-              AND (p.play_ts IS NULL OR r.event_timestamp < p.play_ts)
-        )
-        SELECT count() FROM fg_before_play f
-        JOIN {SESSION_RUNS} sr ON sr.video_session_id = f.sid
-        WHERE abs(toUnixTimestamp(sr.run_start) - toInt64(f.fg_ts / 1000)) < 2
-    """)
-    if n:
-        report("fail", name, f"{n} runs opened within 1s of a pre-Play AppForegrounded event (Rule 3 violated)")
-    else:
-        report("pass", name)
+    report("skip", name, "session_runs removed in v2 design (no audit ledger table) — permanently skipped; "
+                          "guaranteed structurally by 008_delta_fold.sql's activation_ts CTE instead")
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +263,7 @@ def test_ec4_appforegrounded_alone_no_activation():
 
 def test_ec5_gap_minute_concurrency_correct():
     name = "EC5: a minute with no delta row still resolves to the correct (non-zero) running concurrency"
-    missing = [] if table_ready(CC_DELTA_DIMS) else [CC_DELTA_DIMS]
+    missing = [] if table_ready(CC_DELTA_CONTENT) else [CC_DELTA_CONTENT]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
@@ -271,7 +277,7 @@ def test_ec5_gap_minute_concurrency_correct():
 
     hour_start = int(datetime.datetime(2026, 7, 26, 10, 0, tzinfo=UTC).timestamp())
     present = {r["m"] for r in query(f"""
-        SELECT DISTINCT toUnixTimestamp(minute) AS m FROM {CC_DELTA_DIMS}
+        SELECT DISTINCT toUnixTimestamp(minute) AS m FROM {CC_DELTA_CONTENT}
         WHERE minute >= toDateTime('2026-07-26 10:00:00') AND minute < toDateTime('2026-07-26 11:00:00')
     """)}
     all_minutes = [hour_start + i * 60 for i in range(60)]
@@ -295,20 +301,11 @@ def test_ec5_gap_minute_concurrency_correct():
 # ---------------------------------------------------------------------------
 
 def test_ec6_si_phantom_audience_exists():
+    """Depends on both cc_si_minute (HLL sketch table) and session_runs
+    (audit ledger) — both dropped in v2 with no replacement. Permanently
+    skipped, flag to team as a coverage gap."""
     name = "EC6: SI distinct-session presence >= SA distinct active sessions (phantom audience from pocket heartbeats)"
-    missing = [n for n in (CC_SI_MINUTE, SESSION_RUNS) if not table_ready(n)]
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    si_distinct = scalar(f"SELECT uniqCombinedMerge(sessions_state) FROM {CC_SI_MINUTE}")
-    sa_distinct = scalar(f"SELECT count(DISTINCT video_session_id) FROM {SESSION_RUNS} WHERE sign = 1")
-    if si_distinct is None or sa_distinct is None:
-        report("fail", name, "empty result")
-        return
-    if si_distinct >= sa_distinct:
-        report("pass", name, f"SI={si_distinct} >= SA={sa_distinct}")
-    else:
-        report("fail", name, f"SI={si_distinct} < SA={sa_distinct} — SI should be a superset (presence >= true watching)")
+    report("skip", name, "cc_si_minute and session_runs both removed in v2 design — permanently skipped")
 
 
 # ---------------------------------------------------------------------------
@@ -316,17 +313,27 @@ def test_ec6_si_phantom_audience_exists():
 # ---------------------------------------------------------------------------
 
 def test_ec11_13_25_dimension_pinning():
-    name = "EC11/13/25: platform/content_id pinned to first-event value for sessions with raw mid-session drift"
-    missing = [] if table_ready(SESSION_STATE) else [SESSION_STATE]
+    """v2 caveat: unlike v1's explicit "pin at session start" semantics,
+    v2's session_active_sync_mv (006_session_active.sql) just carries
+    whatever platform/content_id accompanied each batch's
+    any(e.platform)/any(e.content_id) (arbitrary-in-batch, not literally
+    first-ever). So this test now checks "the LATEST recorded dims match the
+    FIRST-event dims" for sessions with raw mid-session drift — a weaker but
+    still meaningful claim (it'll typically hold since dims rarely actually
+    change, per data_expectations.py's <=2-sessions-drift finding), not a
+    tautology, a real assertion — just note the semantic is different from
+    v1's guarantee."""
+    name = "EC11/13/25: platform/content_id latest-recorded value matches first-event value for sessions with raw mid-session drift"
+    missing = [n for n in (SESSION_ACTIVE, RAW_EVENTS) if not table_ready(n)]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
     n = scalar(f"""
         SELECT count() FROM (
             SELECT video_session_id AS sid,
-                   argMax(platform, ver) AS pinned_platform,
-                   argMax(content_id, ver) AS pinned_content
-            FROM {SESSION_STATE} GROUP BY video_session_id
+                   argMax(platform, version) AS pinned_platform,
+                   argMax(content_id, version) AS pinned_content
+            FROM {SESSION_ACTIVE} GROUP BY video_session_id
         ) s
         INNER JOIN (
             SELECT video_session_id AS sid, argMin(platform, event_timestamp) AS first_platform,
@@ -337,7 +344,7 @@ def test_ec11_13_25_dimension_pinning():
         WHERE s.pinned_platform != f.first_platform OR s.pinned_content != f.first_content
     """)
     if n:
-        report("fail", name, f"{n} drifted sessions have session_state dims != first-event dims (pinning broken)")
+        report("fail", name, f"{n} drifted sessions have session_active dims != first-event dims")
     else:
         report("pass", name)
 
@@ -347,8 +354,16 @@ def test_ec11_13_25_dimension_pinning():
 # ---------------------------------------------------------------------------
 
 def test_ec15_mismatched_bgfg_closes_via_timeout():
-    name = "EC15: every session with a VideoSessionEnd has no dangling open_run_start left in session_state"
-    missing = [] if table_ready(SESSION_STATE) else [SESSION_STATE]
+    """v2 rewrite: there's no open_run_start/ended pair anymore, only
+    is_active. Equivalent check: every session that saw a real
+    VideoSessionEnd should NOT still show is_active=1 in session_active
+    (that would mean the sweep/end never closed it). Note: because the fold
+    runs asynchronously on a 20-35s refresh cadence, a handful of very
+    recently-ended sessions may not have been swept yet — failures limited
+    to a few very-recent sessions are a timing/eventual-consistency
+    artifact, not a real bug; a systemic pattern would be."""
+    name = "EC15 (v2): every session with a VideoSessionEnd is not still is_active=1 in session_active"
+    missing = [n for n in (SESSION_ACTIVE, RAW_EVENTS) if not table_ready(n)]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
@@ -358,14 +373,14 @@ def test_ec15_mismatched_bgfg_closes_via_timeout():
             WHERE event_type = 'VideoSessionEnd' GROUP BY sid
         )
         SELECT count() FROM (
-            SELECT video_session_id AS sid, argMax(open_run_start, ver) AS ors
-            FROM {SESSION_STATE} GROUP BY video_session_id
+            SELECT video_session_id AS sid, argMax(is_active, version) AS is_active
+            FROM {SESSION_ACTIVE} GROUP BY video_session_id
         ) s
         JOIN ended e USING sid
-        WHERE s.ors IS NOT NULL
+        WHERE s.is_active = 1
     """)
     if n:
-        report("fail", name, f"{n} ended sessions still have an open run — mismatched BG/FG not closed")
+        report("fail", name, f"{n} ended sessions still show is_active=1 — check if recent (sweep lag) or systemic")
     else:
         report("pass", name)
 
@@ -376,7 +391,7 @@ def test_ec15_mismatched_bgfg_closes_via_timeout():
 
 def test_ec18_day_boundary_single_partition():
     name = "EC18: sessions whose events span >1 calendar date land in a single events_raw partition"
-    missing = [] if table_ready(EVENTS_RAW_IMPL) else [EVENTS_RAW_IMPL]
+    missing = [n for n in (EVENTS_RAW_IMPL, RAW_EVENTS) if not table_ready(n)]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
@@ -404,31 +419,12 @@ def test_ec18_day_boundary_single_partition():
 # ---------------------------------------------------------------------------
 
 def test_ec19_marathon_session_capped():
+    """session_runs (per-run duration ledger) is dropped in v2 with no
+    replacement — no per-run duration data exists anywhere in v2 design;
+    session_active only has current is_active + last_seen, not historical
+    run boundaries. Permanently skipped, flag to team as a coverage gap."""
     name = "EC19: the longest-span raw session does not produce one run covering its entire span"
-    missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    row = query(f"""
-        SELECT video_session_id AS sid, max(event_timestamp) - min(event_timestamp) AS span
-        FROM {RAW_EVENTS} GROUP BY sid ORDER BY span DESC LIMIT 1
-    """)
-    if not row:
-        report("skip", name, "raw table empty")
-        return
-    top_sid, total_span_ms = row[0]["sid"], int(row[0]["span"])
-    max_run_ms = scalar(f"""
-        SELECT max(toUnixTimestamp(run_end) - toUnixTimestamp(run_start)) * 1000
-        FROM {SESSION_RUNS} WHERE video_session_id = '{top_sid}'
-    """)
-    if max_run_ms is None:
-        report("pass", name, f"session {top_sid} (span={total_span_ms}ms) produced no single-run coverage")
-        return
-    if max_run_ms < total_span_ms * 0.9:
-        report("pass", name, f"session {top_sid}: longest run={max_run_ms}ms << total span={total_span_ms}ms")
-    else:
-        report("fail", name, f"session {top_sid}: a single run ({max_run_ms}ms) covers ~all of its "
-                              f"{total_span_ms}ms span — 90s timeout not splitting the marathon")
+    report("skip", name, "session_runs removed in v2 design (no per-run duration data) — permanently skipped")
 
 
 # ---------------------------------------------------------------------------
@@ -444,29 +440,11 @@ def test_ec19_marathon_session_capped():
 # ---------------------------------------------------------------------------
 
 def test_ec20_near_zero_duration_sessions_short_runs():
+    """session_runs (per-run duration ledger) is dropped in v2 with no
+    replacement — same coverage gap as EC19, no per-run duration data
+    exists anywhere in v2. Permanently skipped, flag to team."""
     name = "EC20: sessions with Play->End under 2s never produce a run longer than 5s"
-    missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    n = scalar(f"""
-        WITH near_zero AS (
-            SELECT video_session_id FROM {RAW_EVENTS}
-            GROUP BY video_session_id
-            HAVING countIf(event_type = 'VideoPlay') > 0
-               AND countIf(event_type = 'VideoSessionEnd') > 0
-               AND maxIf(event_timestamp, event_type = 'VideoSessionEnd')
-                   - minIf(event_timestamp, event_type = 'VideoPlay') < 2000
-        )
-        SELECT count() FROM {SESSION_RUNS} r
-        WHERE r.sign = 1
-          AND r.video_session_id IN (SELECT video_session_id FROM near_zero)
-          AND toUnixTimestamp(r.run_end) - toUnixTimestamp(r.run_start) > 5
-    """)
-    if n:
-        report("fail", name, f"{n} near-zero-duration sessions produced a run longer than 5s")
-    else:
-        report("pass", name)
+    report("skip", name, "session_runs removed in v2 design (no per-run duration data) — permanently skipped")
 
 
 def main():

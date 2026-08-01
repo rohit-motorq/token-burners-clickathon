@@ -11,21 +11,21 @@ full day.
 
 Two kinds of check per range x filter combo:
 
-1. peak_concurrency / avg_concurrency — answerable EXACTLY from cc_delta_dims
-   (running sum of deltas, restricted to the window). Compared to golden
-   with a tight tolerance.
+1. peak_concurrency / avg_concurrency — answerable EXACTLY from cc_delta_content
+   (running sum of deltas, restricted to the window, summed across content_id).
+   Compared to golden with a tight tolerance.
 
 2. distinct_active_sessions / distinct_active_users — NOT answerable exactly
-   from any table in the current design: cc_delta_dims/cc_delta_content only
-   keep aggregate counts, they throw away session/user identity by design
-   (that's what makes them cheap at scale). The only thing with identity-
-   preserving sketches is cc_si_minute (session_state/user sketches), but
-   that table counts NAIVE presence (includes backgrounded/paused time,
-   ~9% over per the EDA). So this suite checks it as an upper bound only:
-   foreground-only distinct count (golden) <= SI's merged sketch count.
-   If the pipeline needs an EXACT distinct-user-in-range answer, that's a
-   gap against this design — worth flagging to the team, not silently
-   patched here.
+   from any table in the current design: cc_delta_content only keeps
+   aggregate counts, it throws away session/user identity by design (that's
+   what makes it cheap at scale). The only thing with identity-preserving
+   sketches would have been cc_si_minute (session_state/user sketches), but
+   that table does NOT EXIST in the finalized v2 schema (no HLL-sketch table
+   at all) — this is a genuine capability gap, not a not-built-yet stub, so
+   this whole section is now a PERMANENT SKIP. If the pipeline needs an
+   EXACT (or even upper-bound) distinct-user-in-range answer, that's a gap
+   against this design — worth flagging to the team, not silently patched
+   here.
 
 Every check SKIPs if its table doesn't exist yet.
 """
@@ -33,7 +33,7 @@ import json
 import sys
 
 from ch_client import query, scalar, table_exists, table_ready
-from table_names import CC_DELTA_DIMS, CC_SI_MINUTE
+from table_names import CC_DELTA_CONTENT, CC_SI_MINUTE
 
 RESULTS = {"pass": 0, "fail": 0, "skip": 0}
 
@@ -61,10 +61,11 @@ def sql_filter_clause(filters):
 
 def peak_avg_from_delta_dims(start_ms, end_ms, filters):
     """Exact peak + time-weighted avg concurrency in [start_ms, end_ms) from
-    cc_delta_dims. Running sum is seeded from the start of the day so it's
-    correct regardless of hour-boundary alignment; only the query's semantic
-    correctness is under test here, not the hour-boundary latency optimization
-    (that's covered separately in test_benchmarks.py)."""
+    cc_delta_content (summed across content_id). Running sum is seeded from
+    the start of the day so it's correct regardless of hour-boundary
+    alignment; only the query's semantic correctness is under test here, not
+    the hour-boundary latency optimization (that's covered separately in
+    test_benchmarks.py)."""
     start_dt = f"fromUnixTimestamp64Milli({start_ms})"
     end_dt = f"fromUnixTimestamp64Milli({end_ms})"
     fclause = sql_filter_clause(filters)
@@ -73,11 +74,15 @@ def peak_avg_from_delta_dims(start_ms, end_ms, filters):
             SELECT
                 minute,
                 sum(d) OVER (ORDER BY minute) AS cc,
-                leadInFrame(minute, 1, {end_dt})
+                -- cc_delta_content.minute is DateTime('UTC'), not DateTime64(3) like the
+                -- old cc_delta_dims — leadInFrame's default value must match the column's
+                -- exact type, hence the cast (ClickHouse errors on DateTime64 default vs
+                -- DateTime column with BAD_ARGUMENTS otherwise).
+                leadInFrame(minute, 1, toDateTime({end_dt}, 'UTC'))
                     OVER (ORDER BY minute ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS nxt
             FROM (
                 SELECT minute, sum(delta_sessions) AS d
-                FROM {CC_DELTA_DIMS}
+                FROM {CC_DELTA_CONTENT}
                 WHERE toDate(minute) = toDate({start_dt}) {fclause}
                 GROUP BY minute
             )
@@ -96,15 +101,10 @@ def peak_avg_from_delta_dims(start_ms, end_ms, filters):
 
 
 def si_merged_count(field, start_ms, end_ms, filters):
-    start_dt = f"fromUnixTimestamp64Milli({start_ms})"
-    end_dt = f"fromUnixTimestamp64Milli({end_ms})"
-    fclause = sql_filter_clause(filters)
-    sql = f"""
-        SELECT uniqCombinedMerge({field}) AS n
-        FROM {CC_SI_MINUTE}
-        WHERE minute >= {start_dt} AND minute < {end_dt} {fclause}
-    """
-    return scalar(sql)
+    """cc_si_minute does not exist in the v2 design (no HLL sketch table) —
+    kept only so callers/imports don't break; always returns None, callers
+    must treat this as a permanent skip."""
+    return None
 
 
 def within_tol(actual, expected, rel=0.03, floor=3):
@@ -114,9 +114,9 @@ def within_tol(actual, expected, rel=0.03, floor=3):
 
 
 def run_peak_avg_tests(golden):
-    missing = [] if table_ready(CC_DELTA_DIMS) else [CC_DELTA_DIMS]
+    missing = [] if table_ready(CC_DELTA_CONTENT) else [CC_DELTA_CONTENT]
     for g in golden:
-        name = f"[{g['range_name']}/{g['filter_name']}] peak+avg concurrency ({CC_DELTA_DIMS}) matches golden"
+        name = f"[{g['range_name']}/{g['filter_name']}] peak+avg concurrency ({CC_DELTA_CONTENT}) matches golden"
         if missing:
             report("skip", name, f"missing tables: {missing}")
             continue
@@ -136,32 +136,17 @@ def run_peak_avg_tests(golden):
 
 
 def run_distinct_upper_bound_tests(golden):
-    missing = [] if table_ready(CC_SI_MINUTE) else [CC_SI_MINUTE]
+    """cc_si_minute does not exist in the v2 design (no HLL sketch table) —
+    permanently skipped, flag to team if exact/upper-bound distinct-count
+    support is needed."""
     for g in golden:
-        for kind, field, golden_key in (
+        for kind, _field, _golden_key in (
             ("sessions", "sessions_state", "distinct_active_sessions"),
             ("users", "users_state", "distinct_active_users"),
         ):
             name = (f"[{g['range_name']}/{g['filter_name']}] FG distinct {kind} <= "
                     f"SI merged sketch ({CC_SI_MINUTE}) — upper bound")
-            if missing:
-                report("skip", name, f"missing tables: {missing}")
-                continue
-            try:
-                si_count = si_merged_count(field, g["start_ts_ms"], g["end_ts_ms"], g["filters"])
-            except Exception as e:
-                report("fail", name, f"query error: {e}")
-                continue
-            golden_val = g[golden_key]
-            if si_count is None:
-                report("fail", name, f"{CC_SI_MINUTE} returned no rows for this range/filter")
-                continue
-            # SI sketches carry ~1-2% HLL error; allow a small slack below golden too
-            if si_count >= golden_val * 0.97:
-                report("pass", name, f"FG golden={golden_val}, SI merged={si_count}")
-            else:
-                report("fail", name, f"SI merged ({si_count}) < FG golden ({golden_val}) — "
-                                      f"SI should always be >= true foreground count")
+            report("skip", name, f"{CC_SI_MINUTE} removed in v2 design (no HLL sketch table) — permanently skipped")
 
 
 def run_peak_of_union_regression_test(golden):
@@ -192,8 +177,8 @@ def run_peak_of_union_regression_test(golden):
         return
 
     name2 = "implementation's platform-IN query returns the real union peak, not the sum-of-peaks"
-    if not table_ready(CC_DELTA_DIMS):
-        report("skip", name2, f"{CC_DELTA_DIMS} not ready")
+    if not table_ready(CC_DELTA_CONTENT):
+        report("skip", name2, f"{CC_DELTA_CONTENT} not ready")
         return
     impl_peak, _ = peak_avg_from_delta_dims(start_ms, end_ms, {"platform": ["ANDROID_PHONE", "SONY_ANDROID_TV"]})
     if impl_peak == correct_union:

@@ -16,29 +16,38 @@ Two layers, run in order by `./run.sh`:
    Sanity-checked against the EDA's own reported numbers: peak minute matches
    exactly (10:55 UTC on 2026-07-26), peak magnitude within ~1.4%.
 
-3. **`test_benchmarks.py`** — runs the benchmark query set from HLD/DataFlow §7-8
-   against whatever serving tables exist (`cc_delta_dims`, `cc_delta_content`,
-   `cc_si_minute`, `session_state`), and checks:
+3. **`test_schema.py`** / **`test_ordering_key.py`** — checks every serving
+   table's columns, engine, and ORDER BY against `src/migrationv2/migrations/*.sql`
+   exactly (`session_active`, `cc_delta_content`, `pipeline_checkpoint`,
+   `content_dim`, `events_raw`). Catches "table exists but wrong shape/index"
+   before query tests hit a confusing SQL error or a silently-slow query.
+   SKIP per table if it doesn't exist; FAIL if missing a migration-specified
+   column or the ORDER BY doesn't match (order matters — it's the index).
+
+4. **`test_benchmarks.py`** — runs the benchmark query set from HLD/DataFlow §7-8
+   against `cc_delta_content` and `session_active` (the deployed v2 schema,
+   `src/migrationv2/migrations/`), and checks:
    - SA curve matches the reference (2% tolerance) for a filtered dimension
    - concurrency never negative
-   - SA ≤ SI invariant
+   - SA ≤ SI invariant — **permanent SKIP**, `cc_si_minute` dropped in v2
    - peak minute genuinely shifts across dimension filters (catches an
      over-flattened serving table)
    - the hour-boundary reset trick is exact (no silent history dependency)
-   - `session_state` "right now" count is same order of magnitude as the
-     latest batched delta total
+   - `session_active` "right now" count (`is_active=1`) is same order of
+     magnitude as the latest batched delta total
    - per-content drill-down is sane
 
    **Every test SKIPs (not fails) if its required table doesn't exist yet** —
    safe to run before the pipeline is built; re-run after with no changes.
 
-4. **`reference_intervals.py`** — same fold as (2), but emits the flat active-
+5. **`reference_intervals.py`** — same fold as (2), but emits the flat active-
    interval list (session_id, user_id, dims, start_ts, end_ts) instead of
    pre-aggregated minute deltas. Feeds `range_metrics.py`, a pure-Python
    range-query engine (peak / time-weighted-avg / distinct-session-count /
-   distinct-user-count for any `[start, end)` window + dimension filter).
+   distinct-user-count for any `[start, end)` window + dimension filter), and
+   `test_minute_series.py` below.
 
-5. **`golden_ranges.py`** — picks concrete time ranges out of the real event
+6. **`golden_ranges.py`** — picks concrete time ranges out of the real event
    day (quiet pre-event, ramp-up, sustained peak, one peak minute, ramp-down,
    the full event hour, the full day) crossed with a few dimension filters,
    and computes their golden peak/avg/distinct-session/distinct-user values
@@ -47,37 +56,37 @@ Two layers, run in order by `./run.sh`:
    11:07 UTC) golden peak=2298, avg=2168.69, distinct_sessions=6516,
    distinct_users=6026.
 
-6. **`test_range_queries.py`** — runs each golden fixture through the
-   serving tables:
-   - peak/avg concurrency: answered **exactly** by `cc_delta_dims` (running
-     sum of deltas restricted to the window) — tight tolerance vs golden.
-   - distinct active sessions/users: **not exactly answerable** by the
-     current design — `cc_delta_dims`/`cc_delta_content` intentionally drop
-     session/user identity to stay cheap at scale. The only identity-
-     preserving sketches are in `cc_si_minute`, which counts naive presence
-     (backgrounded/paused time included, ~9% over per the EDA). So this is
-     checked as an **upper bound**: golden foreground-only distinct count
-     must be `<=` `cc_si_minute`'s merged uniqCombined sketch for that
-     range. If you need an exact distinct-user-in-range number, that's a
-     design gap to raise with the team, not something this test can silently
-     paper over.
+7. **`test_range_queries.py`** — runs each golden fixture against
+   `cc_delta_content` (peak/avg concurrency, running sum of deltas summed
+   without grouping on `content_id` — same result a dedicated dims-only
+   rollup would have given, see `Docs/CONCURRENCY_VALIDATION.md`). Tight
+   tolerance vs golden. Distinct active sessions/users checks are a
+   **permanent SKIP**: v2's deployed schema (`src/migrationv2/migrations/`)
+   has no identity-preserving sketch table (`cc_si_minute` was dropped in
+   the v1→v2 consolidation) — there is no way to answer "how many distinct
+   sessions/users" from the serving layer today. Design gap, not a bug in
+   the test; raise with the team if exact distinct-count support is needed.
 
-7. **`test_schema.py`** — checks every serving table's columns against
-   LLD-sam.md §2 DDL exactly (`session_state`, `cc_delta_content`,
-   `cc_delta_dims`, `cc_si_minute`, `session_runs`, `pipeline_cursor`,
-   `content_dim`, `events_raw`). Catches "table exists but wrong shape"
-   before query tests hit a confusing SQL error. SKIP per table if it
-   doesn't exist; FAIL if it exists missing an LLD-specified column.
+8. **`test_grain_rollups.py`** — hour-grain (24 buckets) and day-grain (1
+   bucket) peak/avg rollups, reusing `test_range_queries.py`'s primitive.
+   Named explicitly since the problem statement calls out minute/hour/day
+   as three separate graded grains.
 
-8. **`test_ledger.py`** — `session_runs` (LLD §2.7), the only serving table
-   that keeps both session identity and active-interval semantics, so it's
-   the one place a per-session cross-check against `reference_intervals.csv`
-   is possible (aggregate delta tables discard identity by design). Checks:
-   `sign` only ever ±1, `run_start < run_end`, no two active runs overlap
-   for the same session, and per-session active-run COUNT matches the
-   reference exactly for a 200-session sample.
+9. **`test_ledger.py`** — `session_runs`, the v1-design audit-ledger table
+   that would have kept both session identity and active-interval
+   semantics for exact per-session cross-checks. **Dropped in v2** — no
+   replacement table exists, so every check in this file is a permanent
+   SKIP. Kept in the suite (rather than deleted) so the gap stays visible
+   run after run instead of silently disappearing.
 
-9. **`test_edge_cases.py`** — operationalizes `Docs/EDGE_CASES.md`'s 25
+10. **`test_query_performance.py`** — runs representative benchmark queries
+    with a known `query_id`, flushes `system.query_log` cluster-wide, and
+    asserts on `read_rows`/`read_bytes`/`query_duration_ms` — catches a query
+    that secretly full-scans instead of reading a small serving-layer slice.
+    Includes a negative control (a real raw-table scan) to prove the ceiling
+    actually distinguishes scan from seek.
+
+11. **`test_edge_cases.py`** — operationalizes `Docs/EDGE_CASES.md`'s 25
    edge cases + the #0 critical bug (intra-minute flapping) as live checks:
    naive-delta vs correct peak (negative control), terminal-state absorption
    of late events (SessionEnd and VideoError both — see below),
@@ -102,6 +111,13 @@ Two layers, run in order by `./run.sh`:
    terminal/absorbing, same as VideoSessionEnd. Tested as such (`ended=1`,
    folded into the terminal-absorption check). Both design docs are stale
    on this point and should be updated to match.
+
+12. **`test_minute_series.py`** — the full per-minute actual-vs-computed
+    curve for the event day's sustained-peak hour (10:00–11:00 UTC on
+    2026-07-26), not just range-level peak/avg. Catches single-minute spikes
+    that range-level aggregates smooth over — see `Docs/CONCURRENCY_VALIDATION.md`
+    for a worked example (a +165% single-minute spike right at the ramp-up
+    boundary that range-level checks alone don't surface).
 
 `table_ready()` (not just `table_exists()`) gates every query test — a table
 can be DDL'd before the pipeline starts ingesting, and an empty table isn't
@@ -133,10 +149,14 @@ python3 test_benchmarks.py
 
 ## Config
 
-`ch_client.py` reads `CH_URL` / `CH_USER` / `CH_PASS` env vars, falling back to
-the hackathon-provided defaults. Override for a different ClickHouse service
-(e.g. the unseen-day run):
+`ch_client.py` reads `CH_URL` / `CH_USER` / `CH_PASS` / `CH_DATABASE` env vars,
+falling back to `rohitdevtesting` (the deployed v2 pipeline) and the
+hackathon-provided connection defaults. `RAW_EVENTS`/`CONTENT_DIM` in
+`table_names.py` are always fully qualified as `default.*` since the raw seed
+tables live in `default` regardless of which serving database is targeted.
+Override for a different ClickHouse service or database (e.g. the unseen-day
+run):
 
 ```
-CH_URL=... CH_USER=... CH_PASS=... ./run.sh
+CH_URL=... CH_USER=... CH_PASS=... CH_DATABASE=... ./run.sh
 ```

@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-Schema-conformance tests against LLD-sam.md §2 (Data model). Runs before any
-value-level test — if a serving table exists but with the wrong columns, the
-query-level tests would fail with a confusing SQL error instead of a clear
-"missing column X" message. This catches that early.
+Schema-conformance tests against src/migrationv2/migrations/*.sql (the
+finalized, deployed schema). Runs before any value-level test — if a serving
+table exists but with the wrong columns, the query-level tests would fail
+with a confusing SQL error instead of a clear "missing column X" message.
+This catches that early.
 
-Per table: SKIP if it doesn't exist yet, FAIL if it exists but is missing an
-LLD-specified column, PASS otherwise. Extra columns are fine (not checked) —
-only "the LLD's columns are all present" is enforced.
+Per table: SKIP if it doesn't exist yet, FAIL if it exists but is missing a
+migration-specified column, PASS otherwise. Extra columns are fine (not
+checked) — only "the migration's columns are all present" is enforced.
 """
 import sys
 
 from ch_client import query, table_exists
 from table_names import (
-    CC_DELTA_CONTENT, CC_DELTA_DIMS, CC_SI_MINUTE, SESSION_STATE,
-    SESSION_RUNS, PIPELINE_CURSOR, CONTENT_DIM_IMPL, EVENTS_RAW_IMPL,
+    CC_DELTA_CONTENT, SESSION_ACTIVE, PIPELINE_CHECKPOINT,
+    CONTENT_DIM_IMPL, EVENTS_RAW_IMPL,
 )
 
 RESULTS = {"pass": 0, "fail": 0, "skip": 0}
 
-# table -> required columns per LLD §2 DDL
+# table -> required columns per src/migrationv2/migrations/*.sql DDL
 EXPECTED_COLUMNS = {
     EVENTS_RAW_IMPL: {
         "video_session_id", "user_id", "content_id", "event_type", "event",
@@ -27,27 +28,15 @@ EXPECTED_COLUMNS = {
         "subtitle_language", "player_version", "session_start", "ingest_ts",
     },
     CONTENT_DIM_IMPL: {"content_id", "title", "video_type", "category", "updated_at"},
-    SESSION_STATE: {
-        "video_session_id", "user_id", "content_id", "platform", "country",
-        "video_type", "category", "fg", "playing", "ended", "last_seen",
-        "open_run_start", "ver",
+    SESSION_ACTIVE: {
+        "video_session_id", "content_id", "platform", "country",
+        "video_type", "category", "title", "last_seen", "is_active", "version",
     },
     CC_DELTA_CONTENT: {
         "minute", "content_id", "platform", "country", "video_type",
-        "category", "delta_sessions",
+        "category", "title", "delta_sessions",
     },
-    CC_DELTA_DIMS: {
-        "minute", "platform", "country", "video_type", "category", "delta_sessions",
-    },
-    CC_SI_MINUTE: {
-        "minute", "content_id", "platform", "country", "video_type",
-        "sessions_state", "users_state",
-    },
-    SESSION_RUNS: {
-        "video_session_id", "run_start", "run_end", "content_id", "platform",
-        "country", "video_type", "category", "sign",
-    },
-    PIPELINE_CURSOR: {"name", "cursor_ts", "ver"},
+    PIPELINE_CHECKPOINT: {"pipeline_name", "checkpoint_ts", "version"},
 }
 
 

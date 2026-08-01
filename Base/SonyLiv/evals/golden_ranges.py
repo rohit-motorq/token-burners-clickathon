@@ -39,7 +39,7 @@ FILTER_DEFS = [
     {"name": "no_filter", "filters": {}},
     {"name": "platform_android_phone", "filters": {"platform": "ANDROID_PHONE"}},
     {"name": "platform_iphone", "filters": {"platform": "IPHONE"}},
-    {"name": "video_type_live", "filters": {"video_type": "Live"}},
+    {"name": "video_type_live", "filters": {"video_type": "live"}},
 ]
 
 

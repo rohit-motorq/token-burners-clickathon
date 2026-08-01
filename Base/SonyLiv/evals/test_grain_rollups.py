@@ -23,7 +23,7 @@ import sys
 
 from ch_client import table_ready
 from range_metrics import load_intervals, range_metrics
-from table_names import CC_DELTA_DIMS
+from table_names import CC_DELTA_CONTENT
 from test_range_queries import peak_avg_from_delta_dims, within_tol
 
 RESULTS = {"pass": 0, "fail": 0, "skip": 0}
@@ -56,9 +56,9 @@ def main():
     intervals = load_intervals()
 
     print("-- hour-grain rollup (24 buckets) --")
-    if not table_ready(CC_DELTA_DIMS):
+    if not table_ready(CC_DELTA_CONTENT):
         for h in range(24):
-            report("skip", f"hour={h:02d} peak/avg matches golden", f"{CC_DELTA_DIMS} not ready")
+            report("skip", f"hour={h:02d} peak/avg matches golden", f"{CC_DELTA_CONTENT} not ready")
     else:
         for h in range(24):
             name = f"hour={h:02d} peak/avg matches golden"
@@ -80,8 +80,8 @@ def main():
 
     print("\n-- day-grain rollup (1 bucket, full event day) --")
     name = "full day 2026-07-26 peak/avg matches golden"
-    if not table_ready(CC_DELTA_DIMS):
-        report("skip", name, f"{CC_DELTA_DIMS} not ready")
+    if not table_ready(CC_DELTA_CONTENT):
+        report("skip", name, f"{CC_DELTA_CONTENT} not ready")
     else:
         start_ms, end_ms = day_bounds_ms(day)
         golden = range_metrics(intervals, start_ms, end_ms)

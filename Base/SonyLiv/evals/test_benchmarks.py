@@ -16,7 +16,7 @@ import sys
 from collections import defaultdict
 
 from ch_client import query, scalar, table_exists, table_ready
-from table_names import CC_DELTA_CONTENT, CC_DELTA_DIMS, CC_SI_MINUTE, SESSION_STATE
+from table_names import CC_DELTA_CONTENT, SESSION_ACTIVE
 
 RESULTS = {"pass": 0, "fail": 0, "skip": 0}
 
@@ -70,15 +70,15 @@ def reference_curve(rows, platform=None, country=None, video_type=None, content_
 # ---------------------------------------------------------------------------
 
 def test_sa_curve_matches_reference(ref_rows):
-    name = f"SA minute-level curve ({CC_DELTA_DIMS}) matches independent reference, platform=ANDROID_PHONE"
-    missing = require_tables(CC_DELTA_DIMS)
+    name = f"SA minute-level curve ({CC_DELTA_CONTENT}) matches independent reference, platform=ANDROID_PHONE"
+    missing = require_tables(CC_DELTA_CONTENT)
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
 
     impl_rows = query(f"""
         SELECT toUnixTimestamp(minute) AS m, sum(delta_sessions) AS d
-        FROM {CC_DELTA_DIMS}
+        FROM {CC_DELTA_CONTENT}
         WHERE platform = 'ANDROID_PHONE'
         GROUP BY m ORDER BY m
     """)
@@ -105,14 +105,14 @@ def test_sa_curve_matches_reference(ref_rows):
 
 def test_sa_never_negative():
     name = "SA concurrency never goes negative at any minute (any dims)"
-    missing = require_tables(CC_DELTA_DIMS)
+    missing = require_tables(CC_DELTA_CONTENT)
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
     n = scalar(f"""
         SELECT count() FROM (
             SELECT sum(d) OVER (ORDER BY minute) AS cc
-            FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS} GROUP BY minute)
+            FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_CONTENT} GROUP BY minute)
         ) WHERE cc < 0
     """)
     if n and n > 0:
@@ -122,32 +122,16 @@ def test_sa_never_negative():
 
 
 def test_sa_leq_si():
+    """cc_si_minute does not exist in the v2 design (no HLL sketch table) —
+    permanently skipped, flag to team if exact distinct-count support is
+    needed."""
     name = "Invariant: SA concurrency never exceeds SI concurrency, same minute+filter"
-    missing = require_tables(CC_DELTA_DIMS, CC_SI_MINUTE)
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    n = scalar(f"""
-        WITH sa AS (
-            SELECT minute, sum(d) OVER (ORDER BY minute) AS cc
-            FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS} GROUP BY minute)
-        ),
-        si AS (
-            SELECT minute, uniqCombinedMerge(sessions_state) AS cc
-            FROM {CC_SI_MINUTE} GROUP BY minute
-        )
-        SELECT count() FROM sa LEFT JOIN si USING minute
-        WHERE sa.cc > si.cc * 1.02
-    """)
-    if n and n > 0:
-        report("fail", name, f"{n} minutes where SA > SI*1.02 (state machine overcounting)")
-    else:
-        report("pass", name)
+    report("skip", name, "cc_si_minute removed in v2 design (no HLL sketch table) — permanently skipped")
 
 
 def test_peak_shifts_by_dimension():
     name = "Peak minute genuinely differs across dimension filters (serving table isn't pre-flattened)"
-    missing = require_tables(CC_DELTA_DIMS)
+    missing = require_tables(CC_DELTA_CONTENT)
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
@@ -156,7 +140,7 @@ def test_peak_shifts_by_dimension():
         row = scalar(f"""
             SELECT argMax(minute, cc) FROM (
                 SELECT minute, sum(d) OVER (ORDER BY minute) AS cc
-                FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS}
+                FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_CONTENT}
                       WHERE platform = '{platform}' GROUP BY minute)
             )
         """)
@@ -169,16 +153,16 @@ def test_peak_shifts_by_dimension():
 
 def test_hour_boundary_reset_is_exact():
     name = "Hour-boundary cut trick: SA running sum from HH:00 matches full-day running sum at HH:05"
-    missing = require_tables(CC_DELTA_DIMS)
+    missing = require_tables(CC_DELTA_CONTENT)
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
     full = scalar(f"""
-        SELECT sum(d) FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS} GROUP BY minute)
+        SELECT sum(d) FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_CONTENT} GROUP BY minute)
         WHERE minute <= toDateTime('2026-07-26 10:05:00')
     """)
     from_hour = scalar(f"""
-        SELECT sum(d) FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS} GROUP BY minute)
+        SELECT sum(d) FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_CONTENT} GROUP BY minute)
         WHERE minute >= toStartOfHour(toDateTime('2026-07-26 10:05:00'))
           AND minute <= toDateTime('2026-07-26 10:05:00')
     """)
@@ -189,21 +173,21 @@ def test_hour_boundary_reset_is_exact():
 
 
 def test_live_count_matches_session_state():
-    name = f"{SESSION_STATE} 'right now' count matches {CC_DELTA_DIMS} running total for the last minute present"
-    missing = require_tables(SESSION_STATE, CC_DELTA_DIMS)
+    name = f"{SESSION_ACTIVE} 'right now' count matches {CC_DELTA_CONTENT} running total for the last minute present"
+    missing = require_tables(SESSION_ACTIVE, CC_DELTA_CONTENT)
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
-    last_minute = scalar(f"SELECT max(minute) FROM {CC_DELTA_DIMS}")
+    last_minute = scalar(f"SELECT max(minute) FROM {CC_DELTA_CONTENT}")
     delta_total = scalar(f"""
-        SELECT sum(d) FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_DIMS} GROUP BY minute)
+        SELECT sum(d) FROM (SELECT minute, sum(delta_sessions) AS d FROM {CC_DELTA_CONTENT} GROUP BY minute)
         WHERE minute <= toDateTime('{last_minute}')
     """)
     live_count = scalar(f"""
         SELECT count() FROM (
-            SELECT argMax(open_run_start, ver) AS ors, argMax(ended, ver) AS ended
-            FROM {SESSION_STATE} GROUP BY video_session_id
-        ) WHERE ors IS NOT NULL AND ended = 0
+            SELECT video_session_id, argMax(is_active, version) AS is_active
+            FROM {SESSION_ACTIVE} GROUP BY video_session_id
+        ) WHERE is_active = 1
     """)
     # not exact equality (live_count is "right now", delta_total is "as of last batched minute")
     # but should be in the same order of magnitude
@@ -211,13 +195,13 @@ def test_live_count_matches_session_state():
         report("skip", name, "empty result set")
         return
     if abs(delta_total - live_count) > max(50, 0.1 * max(delta_total, 1)):
-        report("fail", name, f"delta running total={delta_total} vs live session_state count={live_count}")
+        report("fail", name, f"delta running total={delta_total} vs live session_active count={live_count}")
     else:
         report("pass", name, f"delta={delta_total} live={live_count}")
 
 
 def test_content_drilldown_prefix_seek():
-    name = f"Per-content drill-down ({CC_DELTA_CONTENT}) sums to same peak as {CC_DELTA_DIMS} for that content's platform mix"
+    name = f"Per-content drill-down ({CC_DELTA_CONTENT}) peak is well-formed for that content's platform mix"
     missing = require_tables(CC_DELTA_CONTENT)
     if missing:
         report("skip", name, f"missing tables: {missing}")
