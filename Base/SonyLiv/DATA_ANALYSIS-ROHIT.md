@@ -772,3 +772,175 @@ This allows dashboard queries like:
 - Dimension drill-down: any combination of filters with sub-second latency
 
 ---
+
+## 30. Peak Minute Shift by Dimension (Critical for Correctness)
+
+The problem statement explicitly states: *"concurrency varies across dimension combinations: a dimension like platform and a content might peak at one minute, while a combination like platform + country might reach its peak at an entirely different minute."*
+
+### Verified: Peak minute differs per platform
+
+| Platform | Peak Minute (FG) | Peak FG Sessions |
+|----------|------------------|-----------------|
+| ANDROID_PHONE | **10:58** | 467 |
+| IPHONE | **10:43** | 108 |
+| SONY_ANDROID_TV | **10:57** | 72 |
+| JIO_ANDROID_TV | **10:50** | 41 |
+| Mweb | **11:02** | 24 |
+| FIRE_TV | **10:59** | 16 |
+| SAMSUNG_HTML_TV | **11:03** | 14 |
+| ANDROID_TAB | **10:43** | 10 |
+| XIAOMI_ANDROID_TV | **10:49** | 10 |
+| LG_HTML_TV | **11:01** | 7 |
+
+### Peak minute by video_type
+
+| Video Type | Peak Minute | Peak FG Sessions |
+|-----------|-------------|-----------------|
+| VOD | **10:59** | 571 |
+| Live | **10:49** | 116 |
+
+**Design Implication:** You CANNOT precompute a single "peak minute" and apply it across all dimensions. The serving table must store per-minute values and let the query find the peak for any arbitrary dimension filter. This rules out approaches that pre-aggregate across dimensions.
+
+---
+
+## 31. Late / Out-of-Order Events
+
+### Event Ordering
+- **Zero out-of-order event pairs** within sessions (events are always timestamp-ordered)
+- **161,660 timestamp ties** across 9,852 sessions (multiple events at same millisecond)
+- **894 state-changing event ties** (e.g., `AppBackgrounded` + `pause` at same ms)
+
+### Duplicate/Tied State Events
+Common tie patterns:
+- `AppBackgrounded` + `pause` at same timestamp (BG triggers pause)
+- `AppForegrounded` + `resume` at same timestamp (FG triggers resume)
+- Duplicate `pause` or `resume` events at same timestamp
+
+**Design Implication:** The state machine must handle idempotent transitions (double-pause = still paused). Ties between BG and pause are safe (both = inactive). Ties between FG and resume are safe (both push to active).
+
+### Events After SessionEnd (Late Arrivals)
+- **239 sessions** (2.2%) have events AFTER their `VideoSessionEnd`
+- **802 total late events** across these sessions
+- Common late events: `network-bandwidth` (275), `AppBackgrounded` (239), `Seek` (88)
+- Average delay after end: 650 seconds (10+ minutes for network events)
+- Max delay: 2,081 seconds (35 minutes)
+- **13 sessions** even have a `VideoPlay` event after end (avg 3 seconds later — likely rapid restart)
+
+**Design Implication:** The pipeline must handle late arrivals. VideoSessionEnd is NOT always the final event. A watermark-based approach is needed: don't finalize a session until a timeout (e.g., 35 minutes) after its SessionEnd event.
+
+---
+
+## 32. Session Lifecycle Completeness
+
+| Lifecycle Pattern | Sessions |
+|------------------|----------|
+| Has Start + Play + End | **10,866 (100%)** |
+| First event = VideoSessionStart | 10,866 (100%) |
+| Last event = VideoSessionEnd | 10,627 (97.8%) |
+| Last event = AppBackgrounded | 217 (2.0%) |
+| Last event = VideoHeartbeat | 16 (0.15%) |
+| Last event = AppForegrounded | 6 (0.05%) |
+
+**Key Finding:** All sessions have a complete lifecycle (Start → Play → End), but 2.2% have trailing events after their End. The unseen day data may have sessions without End events (truly open sessions), which must be handled with timeout-based closure.
+
+---
+
+## 33. Dimension Cardinality & Completeness
+
+### Cardinality (important for ORDER BY key design)
+
+| Dimension | Unique Values | Notes |
+|-----------|--------------|-------|
+| platform | 10 | Low cardinality — good first key |
+| country | 1 (India) | Trivial in this dataset — unseen day might differ |
+| video_type (via join) | 3 (vod, live, empty) | Low cardinality |
+| category (via join) | 80 | Medium cardinality |
+| content_id | 3,357 | High cardinality |
+| audio_language | 41 | Medium (many variants: hin, HIN, hin-hindi) |
+| subtitle_language | 11 | Low |
+| app_version | 65 | Medium |
+| player_version | 14 | Low |
+| video_session_id | 10,866 | High (1:1 with sessions) |
+| user_id | 9,618 | High |
+
+### Data Quality Issues
+
+| Dimension | Empty/Null Count | % |
+|-----------|-----------------|---|
+| platform | 0 | 0% |
+| country | 0 | 0% |
+| audio_language | 1,991 | 0.2% |
+| subtitle_language | 2,006 | 0.2% |
+| app_version | 0 | 0% |
+| player_version | 1,534 | 0.2% |
+| content_id | 0 | 0% |
+
+### Audio Language (Key Dimension - Messy)
+
+| Language | Sessions | Notes |
+|----------|----------|-------|
+| unk / UNK | 6,675 + 28 | Unknown — dominant |
+| hin / HIN / hin-hindi | 6,313 + 1,429 + 308 | Hindi (3 variants!) |
+| eng / ENG / eng-english | 2,116 + 60 + 113 | English (3 variants!) |
+| (empty) | 1,987 | Missing |
+| non | 1,554 | No audio? |
+| mal / MAL | 228 + 62 | Malayalam |
+| tel / TEL | 86 + 15 | Telugu |
+| tam / TAM | 103 + 22 | Tamil |
+
+**Design Implication:** Audio language needs normalization (lowercase + dedup variants) before use as a filter dimension. Same values appear in different cases.
+
+### Content Metadata Join Coverage
+- All 3,357 content IDs in raw data have matching metadata (100% join coverage)
+- Content metadata has 33,464 entries total (only 10% are referenced in raw data — rest are catalog entries not watched)
+
+---
+
+## 34. session_start_epoch Field
+
+- `session_start_epoch` matches the first event timestamp for **100% of sessions** (zero gap)
+- This field is redundant for this dataset but may serve as a source of truth for the unseen day if sessions arrive mid-stream (partial session ingestion)
+
+---
+
+## 35. Analysis Coverage vs Problem Statement Requirements
+
+| Problem Requirement | Analysis Section | Status |
+|---|---|---|
+| Define active interval (paused, BG, no heartbeat) | §10, §5, §6, §18, §19 | ✅ Complete |
+| Represent active ranges (intervals vs deltas) | §13 (delta model proven) | ✅ Complete |
+| Minute-wise peak & average concurrency | §13.2–13.5 | ✅ Complete |
+| Concurrency varies by dimension combo | §30 (peak shift proven) | ✅ Complete |
+| Filter-friendly (platform, country, content, video_type, time) | §7, §8, §14, §24, §25, §33 | ✅ Complete |
+| Handle open sessions | §31, §32 (late events, open sessions) | ✅ Complete |
+| Scale to 100x | §33 (cardinality analysis for key design) | ✅ Informing design |
+| Incremental updates | §31 (late arrivals quantified) | ✅ Complete |
+| Background exclusion | §6, §17, §19, §27 (37% overcount) | ✅ Complete |
+| Heartbeat gap / timeout | §5, §26 (90s threshold validated) | ✅ Complete |
+| Video type (VOD vs Live) behavior | §8, §24, §25 | ✅ Complete |
+| Platform behavior | §7, §14, §20, §21, §25 | ✅ Complete |
+| Data quality / edge cases | §16 (anomaly user), §22 (errors terminal), §31 (ties), §33 (messy langs) | ✅ Complete |
+
+---
+
+## 36. Summary: What We Know for Solution Design
+
+1. **State Machine is validated** — the active/inactive classification from §10 produces 21–37% reduction vs naive. This IS the core of the solution.
+
+2. **Delta model works** — +1 at active start, -1 at active end, cumulative sum = correct concurrency per minute.
+
+3. **90-second timeout is correct** — P95 of heartbeat gaps is 40 seconds; 90s gives 2.25x buffer.
+
+4. **Dimensions peak at different minutes** — must store per-minute per-dimension data (can't pre-aggregate peaks).
+
+5. **Late arrivals exist (2.2% of sessions)** — need watermark or timeout-based finalization.
+
+6. **All sessions are "closed" in training data** — but unseen day will likely have open sessions. Design for it.
+
+7. **Audio language needs normalization** — case-insensitive dedup before use as filter.
+
+8. **301-session anomaly user** — consider user-level session caps or flagging.
+
+9. **Country is single-valued** — may change in unseen day. Include as dimension but don't optimize for it yet.
+
+10. **Errors are always fatal** — simplifies state machine (no recovery path needed).
