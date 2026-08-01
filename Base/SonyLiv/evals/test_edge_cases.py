@@ -15,11 +15,13 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
 
   #  Case                                          Test here / elsewhere
   0  Intra-minute flapping (THE critical bug)       test_ec0_flapping_no_overcount
-  1  active->active dup transitions (resume no-op)  test_ec1_duplicate_transitions_deduped
-  2  inactive->inactive dup transitions              same rule/mechanism as #1; LLD's gate
-                                                      (open_run_start IS NULL) is symmetric,
-                                                      not independently re-tested here
-  3  Events after SessionEnd                         test_ec3_23_terminal_absorbs_late_events
+  1  active->active dup transitions (resume no-op)  test_ledger.py's per-session active-run
+                                                      COUNT vs reference (exact match, 200
+                                                      sessions) is strictly stronger evidence
+                                                      for this than any aggregate count we can
+                                                      build here — not duplicated in this file
+  2  inactive->inactive dup transitions              same as #1 — test_ledger.py
+  3  Events after SessionEnd                         test_ec3_10_23_terminal_absorbs_late_events
   4  AppForegrounded alone doesn't activate           test_ec4_appforegrounded_alone_no_activation
   5  Sparse delta table needs dense read              test_ec5_gap_minute_concurrency_correct
   6  Heartbeats fire while backgrounded               test_ec6_si_phantom_audience_exists
@@ -31,7 +33,10 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
                                                       declares "mean over occupied minutes";
                                                       nothing to assert beyond peak/avg golden
                                                       match already covered elsewhere
-  10 VideoError not terminal                          test_ec10_videoerror_not_terminal
+  10 VideoError terminality                           test_ec10_videoerror_sets_ended +
+                                                      test_ec3_10_23_terminal_absorbs_late_events
+                                                      (confirmed terminal/absorbing by the team —
+                                                      see reconciliation note below)
   11 audio_language drift                             not a session_state dimension (LLD pins
                                                       platform/country/video_type/category
                                                       only) — N/A to the serving-layer design
@@ -48,7 +53,7 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
                                                       isolable without per-event replay — skip
   18 Sessions crossing day boundary                    test_ec18_day_boundary_single_partition
   19 43-hour marathon session                          test_ec19_marathon_session_capped
-  20 Zero-duration sessions                            test_ec20_zero_duration_sessions_no_runs
+  20 Zero/near-zero-duration sessions                  test_ec20_near_zero_duration_sessions_short_runs
   21 Duplicate Start/Play/End                           test_ledger.py per-session run count
                                                       vs reference already exercises this
   22 Out-of-order events (0 true OOO)                  data_expectations.py "events never out
@@ -56,6 +61,19 @@ Coverage matrix (EDGE_CASES.md "Summary of All Edge Cases" table):
   23 Late arrivals after SessionEnd                    test_ec3_23_terminal_absorbs_late_events
   24 Multi-platform users                              informational only — not tested
   25 content_id switch mid-session                     test_ec11_13_25_dimension_pinning
+
+Reconciliation note — #10, VideoError terminality:
+Neither design doc matches the actual pipeline behavior. EDGE_CASES.md's state
+machine (§3.1) has VideoError go ACTIVE -> INACTIVE, explicitly "NOT terminal —
+55 sessions continue." LLD-sam.md's §3.1 event catalog gives VideoError NO
+switch effect at all (dash for fg/playing/ended). Confirmed with the team:
+the actual rule is a third position — VideoError IS terminal/absorbing, same
+as VideoSessionEnd (sets ended=1, session closed for good). Tested as such
+below. 293 sessions in ch_hackathon_raw_data raise VideoError; all 293
+eventually also carry a VideoSessionEnd (consistent with absorbing: a later
+duplicate End is a no-op, same as EC3's "multiple VideoSessionEnd" case).
+LLD-sam.md and EDGE_CASES.md should both be updated to match this decision —
+flagging for the team, not silently patching the design docs here.
 """
 import datetime
 import json
@@ -144,52 +162,58 @@ def test_ec0_flapping_no_overcount():
 
 
 # ---------------------------------------------------------------------------
-# #1/#2 — duplicate active->active / inactive->inactive transitions
+# #3 / #10 / #23 — terminal state absorbs everything, including late arrivals.
+# VideoError is terminal here too (confirmed against the actual pipeline
+# design, which diverges from both LLD-sam.md's DDL table — no switch effect
+# at all — and EDGE_CASES.md — "not terminal, deactivates only"): the first
+# VideoSessionEnd OR VideoError, whichever comes first, closes the session
+# for good.
 # ---------------------------------------------------------------------------
 
-def test_ec1_duplicate_transitions_deduped():
-    name = "EC1: session_runs open-run count is far below raw resume-heartbeat volume (no-op resumes deduped)"
+def test_ec3_10_23_terminal_absorbs_late_events():
+    name = "EC3/EC10/EC23: no session_runs row starts or extends after a session's first VideoSessionEnd/VideoError"
     missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
-    resume_count = scalar(f"""
-        SELECT count() FROM {RAW_EVENTS} WHERE event_type = 'VideoHeartbeat' AND event = 'resume'
+    # session_runs.run_start/run_end are DateTime('UTC') per LLD §2.7 — second
+    # precision, NOT DateTime64. Compare in seconds, not toUnixTimestamp64Milli
+    # (which requires DateTime64 and would error against this column type).
+    n = scalar(f"""
+        WITH terminals AS (
+            SELECT video_session_id AS sid, min(event_timestamp) AS term_ts
+            FROM {RAW_EVENTS} WHERE event_type IN ('VideoSessionEnd', 'VideoError')
+            GROUP BY sid
+        )
+        SELECT count() FROM {SESSION_RUNS} r
+        JOIN terminals t ON r.video_session_id = t.sid
+        WHERE toUnixTimestamp(r.run_start) > toInt64(t.term_ts / 1000) + 1
+           OR toUnixTimestamp(r.run_end)   > toInt64(t.term_ts / 1000) + 1
     """)
-    open_runs = scalar(f"SELECT count() FROM {SESSION_RUNS} WHERE sign = 1")
-    if resume_count is None or open_runs is None:
-        report("fail", name, "empty result")
-        return
-    if open_runs < resume_count:
-        report("pass", name, f"open_runs={open_runs} < resume_events={resume_count}")
+    if n:
+        report("fail", name, f"{n} session_runs rows extend past the first terminal event (+1s slack)")
     else:
-        report("fail", name, f"open_runs={open_runs} >= resume_events={resume_count} "
-                              "— looks like every resume is opening a new run (Rule 1 violated)")
+        report("pass", name)
 
 
-# ---------------------------------------------------------------------------
-# #3 / #23 — terminal state absorbs everything, including late arrivals
-# ---------------------------------------------------------------------------
-
-def test_ec3_23_terminal_absorbs_late_events():
-    name = "EC3/EC23: no session_runs row starts or extends after a session's VideoSessionEnd"
-    missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
+def test_ec10_videoerror_sets_ended():
+    name = "EC10: every session that ever raises VideoError ends up with ended=1 (VideoError is terminal)"
+    missing = [] if table_ready(SESSION_STATE) else [SESSION_STATE]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
     n = scalar(f"""
-        WITH ends AS (
-            SELECT video_session_id AS sid, min(event_timestamp) AS end_ts
-            FROM {RAW_EVENTS} WHERE event_type = 'VideoSessionEnd'
-            GROUP BY sid
+        SELECT count() FROM (
+            SELECT video_session_id, argMax(ended, ver) AS ended
+            FROM {SESSION_STATE} GROUP BY video_session_id
+        ) s
+        WHERE s.video_session_id IN (
+            SELECT video_session_id FROM {RAW_EVENTS} WHERE event_type = 'VideoError'
         )
-        SELECT count() FROM {SESSION_RUNS} r
-        JOIN ends e ON r.video_session_id = e.sid
-        WHERE toUnixTimestamp64Milli(r.run_start) > e.end_ts + 1000
-           OR toUnixTimestamp64Milli(r.run_end)   > e.end_ts + 1000
+        AND s.ended != 1
     """)
     if n:
-        report("fail", name, f"{n} session_runs rows extend past VideoSessionEnd (+1s slack) — terminal not absorbing")
+        report("fail", name, f"{n} sessions with a VideoError are not marked ended=1")
     else:
         report("pass", name)
 
@@ -218,7 +242,7 @@ def test_ec4_appforegrounded_alone_no_activation():
         )
         SELECT count() FROM fg_before_play f
         JOIN {SESSION_RUNS} sr ON sr.video_session_id = f.sid
-        WHERE abs(toUnixTimestamp64Milli(sr.run_start) - f.fg_ts) < 1000
+        WHERE abs(toUnixTimestamp(sr.run_start) - toInt64(f.fg_ts / 1000)) < 2
     """)
     if n:
         report("fail", name, f"{n} runs opened within 1s of a pre-Play AppForegrounded event (Rule 3 violated)")
@@ -285,42 +309,6 @@ def test_ec6_si_phantom_audience_exists():
         report("pass", name, f"SI={si_distinct} >= SA={sa_distinct}")
     else:
         report("fail", name, f"SI={si_distinct} < SA={sa_distinct} — SI should be a superset (presence >= true watching)")
-
-
-# ---------------------------------------------------------------------------
-# #10 — VideoError is not terminal
-# ---------------------------------------------------------------------------
-
-def test_ec10_videoerror_not_terminal():
-    name = "EC10: sessions that error and keep sending events (no VideoSessionEnd) are not marked ended"
-    missing = [] if table_ready(SESSION_STATE) else [SESSION_STATE]
-    if missing:
-        report("skip", name, f"missing tables: {missing}")
-        return
-    n = scalar(f"""
-        WITH continuing AS (
-            SELECT video_session_id AS sid,
-                   maxIf(event_timestamp, event_type = 'VideoError') AS err_ts,
-                   max(event_timestamp) AS last_ts,
-                   countIf(event_type = 'VideoSessionEnd') AS n_end
-            FROM {RAW_EVENTS}
-            GROUP BY sid
-            HAVING countIf(event_type = 'VideoError') > 0
-               AND last_ts > err_ts + 5000
-               AND n_end = 0
-        )
-        SELECT count() FROM (
-            SELECT video_session_id, argMax(ended, ver) AS ended
-            FROM {SESSION_STATE} GROUP BY video_session_id
-        ) s
-        JOIN continuing c ON s.video_session_id = c.sid
-        WHERE s.ended = 1
-    """)
-    if n:
-        report("fail", name, f"{n} error-but-continuing sessions incorrectly marked ended=1 "
-                              "(VideoError must not be treated as terminal on its own)")
-    else:
-        report("pass", name)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +418,7 @@ def test_ec19_marathon_session_capped():
         return
     top_sid, total_span_ms = row[0]["sid"], int(row[0]["span"])
     max_run_ms = scalar(f"""
-        SELECT max(toUnixTimestamp64Milli(run_end) - toUnixTimestamp64Milli(run_start))
+        SELECT max(toUnixTimestamp(run_end) - toUnixTimestamp(run_start)) * 1000
         FROM {SESSION_RUNS} WHERE video_session_id = '{top_sid}'
     """)
     if max_run_ms is None:
@@ -444,43 +432,55 @@ def test_ec19_marathon_session_capped():
 
 
 # ---------------------------------------------------------------------------
-# #20 — zero-duration sessions (no Play/resume ever) produce no runs at all
+# #20 — zero/near-zero-duration sessions net out to ~0 active time
+#
+# Live-verified: "no VideoPlay ever" matches 0 sessions in this dataset (every
+# session eventually plays) — that definition would be vacuous. The real
+# population is sessions whose VideoSessionEnd lands within 2s of VideoPlay
+# (44 sessions, live-checked). Per LLD's state machine these DO get a run —
+# Play opens it (R+), End immediately closes it (R-hard) — so "zero rows" is
+# the wrong invariant too. The correct claim from EDGE_CASES.md ("net 0 delta,
+# natural") is that no such session produces a long-lived run.
 # ---------------------------------------------------------------------------
 
-def test_ec20_zero_duration_sessions_no_runs():
-    name = "EC20: sessions with no VideoPlay/resume ever produce zero session_runs rows"
+def test_ec20_near_zero_duration_sessions_short_runs():
+    name = "EC20: sessions with Play->End under 2s never produce a run longer than 5s"
     missing = [] if table_ready(SESSION_RUNS) else [SESSION_RUNS]
     if missing:
         report("skip", name, f"missing tables: {missing}")
         return
     n = scalar(f"""
-        SELECT count() FROM {SESSION_RUNS} r
-        WHERE r.sign = 1 AND r.video_session_id IN (
+        WITH near_zero AS (
             SELECT video_session_id FROM {RAW_EVENTS}
             GROUP BY video_session_id
-            HAVING countIf(event_type = 'VideoPlay') = 0
-               AND countIf(event_type = 'VideoHeartbeat' AND event = 'resume') = 0
+            HAVING countIf(event_type = 'VideoPlay') > 0
+               AND countIf(event_type = 'VideoSessionEnd') > 0
+               AND maxIf(event_timestamp, event_type = 'VideoSessionEnd')
+                   - minIf(event_timestamp, event_type = 'VideoPlay') < 2000
         )
+        SELECT count() FROM {SESSION_RUNS} r
+        WHERE r.sign = 1
+          AND r.video_session_id IN (SELECT video_session_id FROM near_zero)
+          AND toUnixTimestamp(r.run_end) - toUnixTimestamp(r.run_start) > 5
     """)
     if n:
-        report("fail", name, f"{n} runs emitted for sessions that never played — should be 0 active time")
+        report("fail", name, f"{n} near-zero-duration sessions produced a run longer than 5s")
     else:
         report("pass", name)
 
 
 def main():
     test_ec0_flapping_no_overcount()
-    test_ec1_duplicate_transitions_deduped()
-    test_ec3_23_terminal_absorbs_late_events()
+    test_ec3_10_23_terminal_absorbs_late_events()
+    test_ec10_videoerror_sets_ended()
     test_ec4_appforegrounded_alone_no_activation()
     test_ec5_gap_minute_concurrency_correct()
     test_ec6_si_phantom_audience_exists()
-    test_ec10_videoerror_not_terminal()
     test_ec11_13_25_dimension_pinning()
     test_ec15_mismatched_bgfg_closes_via_timeout()
     test_ec18_day_boundary_single_partition()
     test_ec19_marathon_session_capped()
-    test_ec20_zero_duration_sessions_no_runs()
+    test_ec20_near_zero_duration_sessions_short_runs()
 
     print(f"\n{RESULTS['pass']} passed, {RESULTS['fail']} failed, {RESULTS['skip']} skipped")
     sys.exit(1 if RESULTS["fail"] else 0)

@@ -79,15 +79,29 @@ Two layers, run in order by `./run.sh`:
 
 9. **`test_edge_cases.py`** — operationalizes `Docs/EDGE_CASES.md`'s 25
    edge cases + the #0 critical bug (intra-minute flapping) as live checks:
-   naive-delta vs correct peak (negative control), duplicate-transition
-   dedup, terminal-state absorption of late events, `AppForegrounded`-alone
-   non-activation, sparse-delta gap-minute correctness, SI phantom-audience
-   evidence, `VideoError` non-terminality, dimension pinning under drift,
-   timeout-closes-mismatched-BG/FG, day-boundary partitioning, marathon-
-   session capping, zero-duration-session no-runs. File header has the full
-   coverage matrix — which edge case maps to which test, which are covered
-   by other files in this suite, and which are informational-only / N/A to
-   the design and intentionally untested.
+   naive-delta vs correct peak (negative control), terminal-state absorption
+   of late events (SessionEnd and VideoError both — see below),
+   `AppForegrounded`-alone non-activation, sparse-delta gap-minute
+   correctness, SI phantom-audience evidence, dimension pinning under
+   drift, timeout-closes-mismatched-BG/FG, day-boundary partitioning,
+   marathon-session capping, near-zero-duration-session run-length bound.
+   File header has the full coverage matrix — which edge case maps to which
+   test, which are covered by other files in this suite (`test_ledger.py`'s
+   exact per-session run-count match is strictly stronger than anything an
+   aggregate-count test here could add for the duplicate-transition rules,
+   #1/#2), and which are informational-only / N/A to the design.
+
+   Two edge cases were live-verified against `ch_hackathon_raw_data` and
+   fixed rather than shipped ambiguous: a naive "no VideoPlay ever" read of
+   #20 (zero-duration sessions) matched 0 real sessions and asserted the
+   wrong invariant besides (LLD's state machine gives near-zero sessions a
+   short run, not zero rows — fixed to test run *length* instead); #10
+   (VideoError terminality) — both LLD-sam.md (no switch effect) and
+   EDGE_CASES.md (deactivates, explicitly not terminal) disagree with the
+   actual pipeline behavior, confirmed with the team: VideoError **is**
+   terminal/absorbing, same as VideoSessionEnd. Tested as such (`ended=1`,
+   folded into the terminal-absorption check). Both design docs are stale
+   on this point and should be updated to match.
 
 `table_ready()` (not just `table_exists()`) gates every query test — a table
 can be DDL'd before the pipeline starts ingesting, and an empty table isn't
