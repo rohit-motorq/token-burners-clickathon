@@ -63,6 +63,19 @@ markers. Audio keeps playing in your pocket and the app keeps talking to the ser
 
 > **Rule: a heartbeat proves the app is *running*. It does not prove it is *visible*.**
 
+### ⚠️ Two more traps in the same column
+
+**Downloads aren't watching.** `download_asset_played`, `download_initiated`, and
+`download_completed` fire while a file downloads in the background — no playback at all.
+`download_completed` fires while backgrounded 26% of the time. These must never open an
+active interval.
+
+**But `BufferStart`/`BufferEnd` *are* watching.** This is the trap in the opposite
+direction. They look like the user stopped, but buffering mid-playback is still viewing.
+They're event-driven (p50 2.8s apart) and only 0.21% fire while backgrounded. Treat them
+as "still alive" only — treat them as a stop signal and you'd fragment nearly every
+session and undercount.
+
 ---
 
 ## Part 3 — Step 2: The Three Gates
@@ -170,6 +183,39 @@ one produces 169.
   same-millisecond collisions — without a fixed order, the same input gives different
   answers on different runs.
 
+### Malformed sessions: what each one should produce
+
+Real streams are messy. Each of these was tested by injecting it and checking the output:
+
+| Session shape | Active time | Why |
+|---|---|---|
+| No `END` (still open) | closed at last signal | don't drop it, don't extend it |
+| No `START` (lost/late) | **counted** | a lost START must never erase a session |
+| Never sends `PLAY` | **0s** | never rendered a frame |
+| Heartbeats only, no lifecycle | **0s** | beats alone can't manufacture viewing |
+| `END` timestamp *before* `START` | **0s** | inverted window rejected |
+| Backgrounds and never returns | pre-`BG` only | 344 sessions do this; exclude the tail |
+| Events arriving *after* `END` | clamped to `END` | 802 events, 239 sessions |
+| Every event duplicated | 1 interval | idempotent |
+
+Two of these — no `END` and no `START` — **cannot be tested against the provided file**,
+because every session in it has both. They only got verified because we injected them. The
+problem statement promises open sessions on the unseen day, so this matters.
+
+### Unbalanced background/foreground markers
+
+The data dictionary warns `AppBackgrounded`/`AppForegrounded` are "not guaranteed", and it's
+right: **418 sessions have more `BG` than `FG`** (a background that never closes) and 48
+have the reverse.
+
+Rule: carry the last known state forward and clamp at session end. An unclosed `BG` means
+the rest of the session is inactive. **Never** read a missing `FG` as "must be foreground."
+
+### `VideoError` is not a stop signal
+
+293 sessions hit an error. 238 of them end immediately after — already handled by the `END`
+clamp. But **55 recover and keep playing**. Treating `ERR` as a stop would undercount those.
+
 ---
 
 ## Part 5 — Step 4: Intervals → Minutes → Deltas
@@ -190,6 +236,30 @@ Naive sum → 2 people in minute 10.   WRONG. It's 1 person.
 
 We found **4,854** of these phantom `+1`s. They pushed peak from the true 2,697 up to
 2,902.
+
+**This happens a lot.** Any of these inside a single minute causes it:
+
+```
+BG → FG           user glances at a notification and comes back
+pause → play      user pauses and resumes
+pause → play → pause → play    ...twice
+```
+
+**12.75%** of all session-minutes (3,476 of 27,268) contain more than one active
+interval. Worst case in the real data: **21 intervals in one minute**. Pause/resume churn
+is the main cause — pure background churn is rarer, because backgrounding usually lasts
+past a minute boundary.
+
+Tested with deliberately injected patterns (`out_10.txt`):
+
+| Pattern in one minute | Intervals | Counted as |
+|---|---|---|
+| `BG → FG` | 2 | **1** ✓ |
+| `pause → play → pause → play` | 3 | **1** ✓ |
+| 10 rapid flips | 6 | **1** ✓ |
+| `BG` and `FG` in the same millisecond | 1 | **1** ✓ |
+
+Without the dedupe step those 7 test sessions would report **15 viewers instead of 7**.
 
 **The fix — three small steps:**
 
@@ -296,18 +366,93 @@ deltas simply add up, so nothing needs repairing.
 This isn't a rare path either — **4,511 of 10,850 sessions (42%) have more than one run**.
 It's a common case, so it gets exercised constantly instead of quietly rotting.
 
-### 🔑 The change that makes this actually work
+### ⚠️ Split by TIME, not by session state
 
-Two rules that turn the hot path from "unbounded" into "bounded":
+There's a tempting version of this design that looks almost identical and is **badly
+wrong**. It's worth spelling out because it's the natural way to describe a hybrid:
+
+> ❌ "Closed sessions go in the delta table. Open sessions stay as live rows.
+> Answer = cumulative sum of closed deltas **+** count of open rows."
+
+That's a **session-state** split. We measured it against a **time** split. Two independent
+defects:
+
+**Defect 1 — it corrupts history, not just the live edge.**
+
+An open session was also watching *in the past*. If history only reads the closed-session
+table, every past minute covered by a still-open session goes missing.
+
+At a watermark mid-peak (3,338 open sessions):
+
+| | |
+|---|---|
+| True historical peak | **2,695** |
+| Peak from closed sessions only | **1,437** |
+| **Shortfall** | **1,258 viewers (47% undercount)** |
+| Past minutes undercounted | 208 |
+| Worst single minute | 2,474 true vs 210 reported |
+
+Where those open sessions' minutes actually sit:
+
+```
+the watermark minute itself      426 minutes
+within 5 min before           10,484
+6–30 min before               25,131   ← all of this is HISTORY
+31–120 min before              1,121      that the state split loses
+more than 2 hours before         105
+```
+
+Only 426 of 37,267 open-session minutes are at the live edge. **The rest are the past.**
+
+**Defect 2 — the addition is a category error.**
+
+"Add 5,000 from history to 2,000 live" doesn't work, because the cumulative sum of closed
+deltas at the *current* minute is ≈0 by construction — every closed session contributes
+`+1` and `−1`, which cancel once it's over. Measured: **4**, not 5,000.
+
+Any non-zero number you find there is concurrency for a *different minute*. Adding it to a
+live count adds two different points in time together.
+
+**The fix — split by time:**
+
+```
+cold path serves  minute <  watermark    → label 'final'
+hot  path serves  minute >= watermark    → label 'provisional'
+```
+
+Disjoint by construction, so no double-count at the seam and nothing to add up.
+Open sessions still emit their `+1` immediately, so their past minutes land in the cold
+path right away.
+
+```
+ASSERTION time-split (eager +1) == truth for all minutes <= watermark -> PASS
+```
+
+### 🔑 The two rules that make the hot path bounded
 
 **1. Emit the `+1` immediately when a run opens.** Don't wait for the run to finish.
 Otherwise a 43-hour session contributes nothing to history for 43 hours, and the live path
-has to serve 43 hours of data. That breaks.
+has to serve 43 hours of data. That breaks. This is also what fixes Defect 1 above.
 
 **2. Cut runs at hour boundaries.** A run crossing 11:00 becomes two runs. This is
 **free** — the deltas `+1@11:00` and `−1@11:00` cancel out, so the numbers don't change at
 all. But it guarantees the live path only ever holds one short segment per session, no
 matter how long someone watches.
+
+### 🐞 One more off-by-one: where does the `−1` go?
+
+The usual phrasing is "active from minute 1 to minute 5 → `+1` at 1, `−1` at 5." That
+quietly drops the viewer a minute early:
+
+| Minute | `−1` at end minute | `−1` at end **+1** |
+|---|---|---|
+| 1–4 | 1 | 1 |
+| **5** | **0** ❌ | **1** ✓ |
+| 6 | 0 | 0 |
+
+If the session occupied minute 5, concurrency at minute 5 must be 1. Emit `−1` at
+**(last occupied minute + 1)** and state the convention explicitly: intervals are
+half-open, `[start, end)`.
 
 ---
 
@@ -355,6 +500,21 @@ But it's also one of the most-requested filters. So run two:
 
 One giant all-dimensions cube does not stay small.
 
+### Two dimension rules that silently delete data
+
+**Always `LEFT JOIN` the content metadata, never `INNER`.** 1,089 content rows have a blank
+`video_type`, affecting **250 sessions**. An inner join would silently remove those sessions
+from every `video_type`-filtered answer. Use `LEFT JOIN` + `coalesce(..., 'unknown')`.
+
+**Normalise sentinel values at ingest.** The same concept appears under several spellings:
+`audio_language` has 40 raw values but only 25 after lower/trim; `subtitle_language` has 10
+vs 7. A filter on `unk` would miss `UNK`, and group-by totals would split across case
+variants. Collapse them to one `unknown` token on the way in.
+
+**Pin dimensions at session start.** Dimensions drift mid-session — 6,864 sessions change
+`audio_language`, 95 change `platform`. If you don't pin them, one session lands in two
+slices and per-slice counts stop summing to the total.
+
 ---
 
 ## Part 8 — Two Query Rules the Database Can't Enforce
@@ -387,7 +547,7 @@ The same question has three honest answers:
 | average over every minute in the range (including empty ones) | **7.47** |
 | time-weighted (credit partial minutes properly) | **28.99** |
 
-A **4x spread**. It happens because 50.1% of active intervals are shorter than one
+A **4.7x spread**. It happens because 50.1% of active intervals are shorter than one
 minute — so "was this person here for the whole minute?" genuinely matters.
 
 **Pick one, write it in the API docs, and state it next to the number.**
@@ -450,14 +610,42 @@ Carrying state forward handles all of these for free (a second `BG` changes noth
 Hand-written pattern rules would not — there are **2,655 distinct session shapes** in the
 data, and the most common one covers just 10.8%.
 
-### 🟡 Don't trust two things this dataset happens to do
+### 🟡 Don't trust things this dataset happens to do
 
-Both look like properties. Neither is safe:
+These look like properties of the data. They're artifacts of the generator, and building on
+them will break on the unseen day:
 
-1. **Every session here has an end event.** The problem statement promises open sessions
-   on the unseen day. Build and test that path anyway.
-2. **Every session here backgrounds at least once.** That's a quirk of how the test data
-   was generated. Handle a session with no state markers at all.
+| Looks like a rule | Reality |
+|---|---|
+| Every session has an `END` | The problem statement **promises** open sessions. Build that path. |
+| Every session backgrounds at least once | Handle a session with **no** state markers at all. |
+| `country` is always `india` | Still model it as a real dimension; don't optimise it away. |
+| No nulls anywhere, no negative durations | Defend anyway. |
+| Content metadata covers 100% of IDs | Keep the `LEFT JOIN`. |
+| Load is one big spike in one day | A design that only performs on sparse data looks fine here. |
+
+### 🔴 The bug that only appears in ClickHouse
+
+Worth its own entry, because it's the kind of thing that passes every local test and then
+loses data in production.
+
+```
+DuckDB:      greatest(5, NULL) = 5      ← silently SKIPS the NULL
+ClickHouse:  greatest(5, NULL) = NULL   ← PROPAGATES it 💀
+```
+
+Our builder used `greatest(ts, start_ms)`. With a NULL `start_ms` in ClickHouse the whole
+expression becomes NULL and **that session disappears from concurrency entirely.**
+
+It was invisible twice over: every session in this file has a `START`, *and* DuckDB masked
+the NULL behaviour even when we injected one that didn't.
+
+Fix: write `coalesce(start_ms, first_ts)` explicitly instead of relying on engine NULL
+rules. And we strengthened the test to assert the `coalesce` is **present in the SQL**, not
+just that some output appeared — otherwise it keeps passing for the wrong reason.
+
+**Lesson: passing in DuckDB does not mean passing in ClickHouse.** Re-run the edge case
+audit against the real engine before trusting the port.
 
 ### 🔴 No single "correction factor"
 
@@ -566,6 +754,8 @@ CLICKHOUSE                   │                             │
 | Edge case census with policies | `analysis/out_04.txt` |
 | Open sessions, incrementality | `analysis/out_05.txt` |
 | Table sizing by dimension set | `analysis/out_06.txt` |
+| Edge case audit (16 PASS / 3 GAP / 0 FAIL) | `analysis/out_09.txt` |
+| **Intra-minute flapping (BG/FG, pause/play churn)** | `analysis/out_10.txt` |
 
 Reproduce everything: `cd analysis && ./run_all.sh --fresh`
 

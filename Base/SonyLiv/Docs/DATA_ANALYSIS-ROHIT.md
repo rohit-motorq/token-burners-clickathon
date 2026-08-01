@@ -944,3 +944,209 @@ Common tie patterns:
 9. **Country is single-valued** — may change in unseen day. Include as dimension but don't optimize for it yet.
 
 10. **Errors are always fatal** — simplifies state machine (no recovery path needed).
+
+
+---
+
+## 37. ANOMALY REPORT
+
+### Summary: All Anomalies Found
+
+| # | Anomaly | Count | Severity | Impact on Concurrency |
+|---|---------|-------|----------|----------------------|
+| A1 | **Duplicate state transitions** (active→active) | 10,861 events in 1,980 sessions | 🔴 HIGH | Would cause double +1 deltas if not filtered |
+| A2 | **Duplicate state transitions** (inactive→inactive) | 14,907 events in 10,775 sessions | 🔴 HIGH | Would cause double -1 deltas if not filtered |
+| A3 | Sessions shared between 2 users (same session_id) | 120 sessions | 🟡 MEDIUM | Affects user-level dedup |
+| A4 | Sessions with more resumes than pauses | 1,184 sessions (10.9%) | 🟡 MEDIUM | State machine must be idempotent |
+| A5 | Post-terminal events (events after SessionEnd) | 239 sessions (2.2%) | 🟡 MEDIUM | Must treat terminal as absorbing state |
+| A6 | Mismatched BG/FG counts | 466 sessions (4.3%) | 🟡 MEDIUM | BG without matching FG = session dies in background |
+| A7 | 301-session anomaly user (load test/bot) | 1 user, 301 sessions | 🟡 MEDIUM | Inflates session-level concurrency by ~3% |
+| A8 | Users on multiple platforms simultaneously | 85 users | 🟢 LOW | Account sharing; valid for session-level counting |
+| A9 | Multi-day session (43 hours, backgrounded 2 days) | 1 session | 🟢 LOW | Timeout handles it |
+| A10 | Sessions with duplicate Start/Play/End events | 13/16/14 sessions | 🟢 LOW | Idempotent handling sufficient |
+| A11 | Zero-duration sessions | 12 sessions | 🟢 LOW | Bounced immediately; no active time |
+| A12 | Live content with seek events | 96 sessions | 🟢 LOW | DVR/catch-up feature; valid |
+
+---
+
+### A1 & A2: Duplicate State Transitions (CRITICAL)
+
+**The most important anomaly.** A naive delta model that emits +1 for every `active` signal and -1 for every `inactive` signal will be WRONG.
+
+#### Active → Active duplicates (10,861 events):
+
+| Pattern | Count | Cause |
+|---------|-------|-------|
+| resume → resume (back-to-back) | 9,950 | SDK fires multiple resumes |
+| Play → resume | 894 | Resume after Play (already active) |
+| Play → Play | 17 | Duplicate Play events |
+
+**Root Cause:** The SDK fires a `resume` heartbeat as a "keep-alive" signal even when already playing. It does NOT mean the user paused and resumed. It's the SDK confirming "still active."
+
+#### Inactive → Inactive duplicates (14,907 events):
+
+| Pattern | Count | Cause |
+|---------|-------|-------|
+| pause → AppBackgrounded | 11,265 | User pauses then backgrounds (both = inactive) |
+| AppBackgrounded → pause | 2,185 | Background fires, then late pause arrives |
+| AppBackgrounded → AppBackgrounded | 948 | Double BG events |
+| SessionStart → AppBackgrounded | 328 | App starts backgrounded |
+| pause → pause | 166 | Duplicate pause |
+
+**Root Cause:** The pause→BG sequence is the most common "leaving" pattern. The user pauses, then switches apps. Both fire as separate events but represent the same state transition.
+
+#### Fix for State Machine:
+
+```
+ONLY emit a delta when the NEW state DIFFERS from the PREVIOUS state.
+- If prev_state = 'active' AND new_state = 'active' → NO DELTA (skip)
+- If prev_state = 'inactive' AND new_state = 'inactive' → NO DELTA (skip)
+```
+
+This is why the architecture uses `lag()` to compare previous state before emitting deltas.
+
+---
+
+### A3: Shared Session IDs (120 sessions with 2 users)
+
+- **All 120 cases** have exactly 2 users per session_id
+- **83 (69%)** are on iPhone — likely iOS profile switching
+- **25 (21%)** are on Sony Android TV — family sharing on shared device
+- Users have **overlapping timestamps** (both active within same session)
+- This appears to be **app-level account switching** where the session_id persists across user switches
+
+**Impact:** For session-level concurrency, this is fine (1 session = 1 stream). For user-level concurrency, it slightly undercounts (should be 2 viewers, shows as 1 session).
+
+**Handling:** Count at session level for concurrency. For user-level metrics, split shared sessions at user_id boundaries.
+
+---
+
+### A4: More Resumes Than Pauses (1,184 sessions = 10.9%)
+
+Distribution of resume excess:
+- 3 extra resumes: 180 sessions
+- 5 extra: 104 sessions
+- 10 extra: 71 sessions
+- 20+ extra: 9 sessions
+
+**Root Cause:** The SDK fires `resume` as a periodic "I'm alive and playing" confirmation, not only after an explicit pause. This is actually the heartbeat mechanism for proving foreground activity.
+
+**Impact on State Machine:** The state machine must be **idempotent** — a `resume` when already `active` is a no-op, not a new +1 delta.
+
+---
+
+### A5: Post-Terminal Events (243 sessions)
+
+Events arriving AFTER `VideoSessionEnd` or `VideoError`:
+
+| Event After Terminal | Count | Avg Delay | Interpretation |
+|---------------------|-------|-----------|----------------|
+| Duplicate SessionEnd | 295 | 1.3 sec | SDK fires end twice |
+| AppBackgrounded | 220 | 1.7 sec | App backgrounds after end (normal) |
+| VideoPlay (new play!) | 17 | 49 sec | Session restart with same ID |
+| pause | 5 | 122 sec | Late heartbeat delivery |
+| resume | 1 | 7 sec | Late heartbeat delivery |
+
+**Impact:** Terminal state must be **absorbing** — once a session ends, all subsequent events for that session_id should be ignored (or treated as a new logical session if VideoPlay arrives).
+
+**Exception:** The 17 cases where VideoPlay arrives after SessionEnd (avg 49 sec later) suggest the session was restarted. At hackathon scale these are negligible, but at 100x scale, these represent ~1,700 cases/day that need a "session restart" handler.
+
+---
+
+### A6: Mismatched BG/FG Counts (466 sessions = 4.3%)
+
+| Pattern | Sessions | Meaning |
+|---------|----------|---------|
+| BG count = FG count (balanced) | 10,400 (95.7%) | Normal: every BG has matching FG |
+| 1 more BG than FG | 407 (3.7%) | User backgrounded and never returned |
+| 2 more BG than FG | 10 | Multiple unreturned backgrounds |
+| 1 more FG than BG | 45 (0.4%) | App started in background (FG is first) |
+| 2 more FG than BG | 3 | Edge case |
+
+**Impact:** Sessions with extra BGs (407) represent users who left the app permanently while it was backgrounded. The session ends in a "backgrounded" state. These are correctly handled by: BG → inactive → timeout (90s) → dead.
+
+**The 45 sessions with FG-first** are more interesting: the app may have been launched in the background (notification, system restore) and then foregrounded. Our state machine handles this correctly (initial state = inactive; FG alone doesn't make it active).
+
+---
+
+### A7: The 301-Session Anomaly User
+
+| Detail | Value |
+|--------|-------|
+| User ID | `4CE58A954A...` |
+| Total sessions | 301 |
+| Total events | 19,479 |
+| Active window | 10:30–11:30 UTC only |
+| Platforms | SONY_ANDROID_TV (237), XIAOMI_ANDROID_TV (42), FIRE_TV (16), JIO_ANDROID_TV (6) |
+| Peak simultaneous sessions | 110 at 11:00 |
+| Events per session | ~1 (most sessions have exactly 1 event!) |
+
+**Assessment:** This is almost certainly a **commercial venue** (sports bar, hotel) or an **automated testing account**. The 237 Sony TV sessions with 1 event each suggest a fleet of TVs managed by one account.
+
+**Impact on Concurrency:**
+- Session-level: adds 110 sessions at peak (4.7% of peak 2,316)
+- User-level: counts as 1 user regardless
+- **Recommendation:** Flag but don't exclude — commercial venues are legitimate viewers
+
+---
+
+### A8: Multi-Platform Simultaneous Users (85 users)
+
+| Platform Combo | Count |
+|---------------|-------|
+| ANDROID_PHONE + ANDROID_TAB | 81 |
+| SONY_ANDROID_TV + other | 3 |
+| IPHONE + other | 2 |
+
+**Assessment:** 81 out of 85 are ANDROID_PHONE + ANDROID_TAB — likely the same physical device with inconsistent platform reporting, OR a user watching on both phone and tablet simultaneously (family member on tablet while parent on phone).
+
+**Not anomalous** for concurrency counting — each device is a valid concurrent stream.
+
+---
+
+### A9: The 43-Hour Session
+
+| Hour | Events | Activity |
+|------|--------|----------|
+| Jul 24, 11:00 | 74 | Started watching (VOD) |
+| Jul 24, 12:00 | 8 | Backgrounded |
+| Jul 24, 14:00 | 3 | Brief foreground check, then BG again |
+| **(42-hour gap)** | **0** | App stayed in memory, backgrounded |
+| Jul 26, 06:00 | 214 | Returned! Resumed watching |
+| Jul 26, 07:00 | 101 | Finished and ended session |
+
+**Assessment:** A user left a VOD paused/backgrounded for 2 days, then came back and finished it. The app maintained the session across this gap. This is **valid behavior** but our 90-second timeout correctly marks it inactive during the 42-hour gap.
+
+---
+
+### A10-A12: Low-Severity Anomalies
+
+**A10 (Duplicate Start/Play/End):** 13-16 sessions with double lifecycle events. SDK race conditions. Handled by idempotent state machine.
+
+**A11 (Zero-duration sessions):** 12 sessions where all events share the same timestamp. These are instant bounces — Start, Play, End in the same millisecond. Count as 0 active time.
+
+**A12 (Seek in Live):** 96 live sessions have seek events. This is the **DVR/catch-up** feature in live streaming — users can seek backward in the live stream buffer. Valid engagement signal.
+
+---
+
+### Design Implications from Anomalies
+
+| Anomaly | Required Fix | Implementation |
+|---------|-------------|----------------|
+| A1/A2: Duplicate transitions | **State machine must compare prev_state** | Use `lag()` — only emit delta when state CHANGES |
+| A3: Shared sessions | Count at session level, not user level | Default to session-level concurrency |
+| A4: Extra resumes | Idempotent active→active = no-op | Already handled by prev_state check |
+| A5: Post-terminal events | Terminal is absorbing state | Skip all events after first terminal |
+| A6: Unpaired BGs | Timeout handles dangling BG | 90-second watermark marks as inactive |
+| A7: Bot user | Optional: cap sessions per user | Flag but don't exclude |
+
+### Key Takeaway
+
+**The #1 correctness risk is A1/A2 — duplicate state transitions.** If the delta model doesn't filter these, it will emit 10,861 extra +1 deltas and 14,907 extra -1 deltas, leading to:
+- Instantaneous overcounting during active→active bursts
+- Concurrency going NEGATIVE during inactive→inactive bursts
+- Both are catastrophic for accuracy
+
+The fix is simple but mandatory: **only emit a delta when `new_state != prev_state`**.
+
+---

@@ -247,57 +247,135 @@ Populated by a periodic job (every 1–5 minutes) that:
 
 ```
 State: INACTIVE (initial)
-  → VideoPlay/Play              → ACTIVE
-  → VideoHeartbeat/resume       → ACTIVE
+  → VideoPlay/Play              → ACTIVE   (emit +1)
+  → VideoHeartbeat/resume       → ACTIVE   (emit +1)
+  → AppForegrounded (alone)     → stays INACTIVE (Rule 3: FG ≠ active)
+  → VideoSessionEnd             → TERMINAL (no delta — wasn't counted)
 
 State: ACTIVE
-  → AppBackgrounded             → INACTIVE
-  → VideoHeartbeat/pause        → INACTIVE
-  → VideoSessionEnd             → TERMINAL
-  → VideoError                  → TERMINAL
-  → No event for 90 seconds     → INACTIVE (timeout)
+  → AppBackgrounded             → INACTIVE (emit -1)
+  → VideoHeartbeat/pause        → INACTIVE (emit -1)
+  → VideoSessionEnd             → TERMINAL (emit -1)
+  → VideoError                  → TERMINAL (emit -1)
+  → No event for 90 seconds     → INACTIVE (emit -1 at timeout)
+  → VideoHeartbeat/resume       → stays ACTIVE (Rule 1: no duplicate delta)
+  → VideoPlay/Play              → stays ACTIVE (Rule 1: no duplicate delta)
+  → AppForegrounded             → stays ACTIVE (FG is always no-op)
 
 State: INACTIVE
-  → VideoHeartbeat/resume       → ACTIVE
-  → VideoPlay/Play              → ACTIVE
-  → AppForegrounded (alone)     → stays INACTIVE (need resume)
-  → VideoSessionEnd             → TERMINAL
+  → VideoHeartbeat/resume       → ACTIVE   (emit +1)
+  → VideoPlay/Play              → ACTIVE   (emit +1)
+  → AppBackgrounded             → stays INACTIVE (Rule 1: no duplicate delta)
+  → VideoHeartbeat/pause        → stays INACTIVE (Rule 1: no duplicate delta)
+  → AppForegrounded             → stays INACTIVE (Rule 3: FG ≠ active)
+  → VideoSessionEnd             → TERMINAL (no delta — wasn't counted)
 
-State: TERMINAL
-  → (no transitions possible)
+State: TERMINAL (absorbing — Rule 2)
+  → ANY EVENT                   → stays TERMINAL (discard everything)
 ```
 
-### 5.2 What Generates Deltas
+### 5.2 The 3 Non-Negotiable Rules (from Edge Case Analysis)
 
-Each state transition that CHANGES state produces deltas:
+| Rule | What It Prevents | Occurrences in Data |
+|------|-----------------|---------------------|
+| **Rule 1:** Only emit delta when `prev_state != new_state` | 9,950 phantom +1s and 14,907 phantom -1s | 25,768 events |
+| **Rule 2:** Terminal is absorbing (no escape) | Dead sessions resurrecting | 538 post-terminal events |
+| **Rule 3:** AppForegrounded alone does NOT activate | Counting paused-screen viewers as active | Thousands of FG→pause sequences |
 
-| Transition | Delta Written |
-|-----------|---------------|
-| INACTIVE → ACTIVE | `+1` at this minute |
-| ACTIVE → INACTIVE | `-1` at this minute |
-| ACTIVE → TERMINAL | `-1` at this minute |
-| Timeout (no event for 90s) | `-1` at last_event_minute + 2 |
+### 5.3 What Generates Deltas
 
-### 5.3 Handling Timeouts at Scale
+Only ACTUAL state changes produce deltas:
+
+| Transition | Delta | Condition |
+|-----------|-------|-----------|
+| INACTIVE → ACTIVE | `+1` at this minute | prev_state was inactive/null |
+| ACTIVE → INACTIVE | `-1` at this minute | prev_state was active |
+| ACTIVE → TERMINAL | `-1` at this minute | prev_state was active |
+| INACTIVE → TERMINAL | `0` (no delta) | Wasn't being counted |
+| SAME → SAME | `0` (no delta) | Rule 1: skip duplicates |
+| TERMINAL → anything | `0` (discard) | Rule 2: absorbing |
+| Timeout (no event 90s) | `-1` at last_event_minute + 2 | Only if last_state was active |
+
+### 5.4 Out-of-Order Event Handling
+
+**Current data:** Zero OOO events observed (all timestamps monotonically increase per session).
+
+**Defensive design for unseen day:** Always sort events by timestamp before state machine processing.
+
+```sql
+-- Sort order for state machine input:
+ORDER BY 
+    video_session_id,
+    event_timestamp,
+    -- Tie-breaking for same-millisecond events:
+    multiIf(
+        // NOTE: include this in our design
+        event_type = 'VideoSessionStart', 1,
+        event_type = 'VideoPlay', 2,
+        event_type = 'VideoHeartbeat' AND event = 'resume', 3,
+        event_type = 'VideoHeartbeat' AND event = 'pause', 4,
+        event_type = 'AppBackgrounded', 5,
+        event_type = 'AppForegrounded', 6,
+        event_type = 'VideoSessionEnd', 7,
+        event_type = 'VideoError', 8,
+        9
+    )
+```
+
+**Why this tie-breaking order:**
+- Start/Play first → establish the session and active state
+- resume before pause → conservative (if tied, end up inactive = don't overcount)
+- Terminal last → captures maximum active time before death
+
+**If true OOO exists in unseen day:**
+- The batch approach (sort all → process) handles it automatically
+- The streaming approach needs reconciliation (see §6.3)
+
+### 5.5 Handling Timeouts at Scale
 
 **Problem:** If a session goes silent, we need to emit a `-1` delta 90 seconds after its last event. But materialized views only fire on INSERT — no INSERT means no trigger.
 
-**Solution: Watermark-based cleanup job**
+**Solution: Watermark-based cleanup job (runs every 60 seconds)**
 
+// NOTE: we missed this in our design
 ```sql
--- Run every 2 minutes: find sessions that timed out
-INSERT INTO concurrency_deltas (minute, platform, ..., session_delta)
+-- Find sessions that timed out and emit -1 deltas
+INSERT INTO concurrency_deltas (minute, platform, country, video_type, category, content_id, session_delta, user_delta)
 SELECT 
-    toStartOfMinute(fromUnixTimestamp64Milli(last_event_timestamp + 90000)),
-    platform, ...,
-    -1 as session_delta
+    toStartOfMinute(fromUnixTimestamp64Milli(last_event_timestamp + 90000)) AS minute,
+    platform,
+    country,
+    dictGet('content_dict', 'video_type', content_id) AS video_type,
+    dictGet('content_dict', 'category', content_id) AS category,
+    content_id,
+    -1 AS session_delta,
+    0 AS user_delta
 FROM session_state FINAL
 WHERE last_state = 'active'
     AND last_event_timestamp < (toUnixTimestamp64Milli(now()) - 90000)
-    AND session_end_ts = 0;  -- still open
+    AND session_end_ts = 0;
 ```
 
-At 100x scale: this scans only sessions in 'active' state with stale timestamps — typically <1% of total sessions at any moment.
+**At 100x scale:** This scans only sessions in 'active' state with stale timestamps — typically <1% of total sessions at any moment (~10K rows max). Sub-second execution.
+
+### 5.6 Liveness Clock (What Resets Timeout)
+
+ANY event from the session resets the 90-second timeout, not just state-changing events:
+
+| Event | Resets Clock? | Changes State? |
+|-------|:---:|:---:|
+| VideoHeartbeat/buffer-health | ✅ | ❌ |
+| VideoHeartbeat/network-activity | ✅ | ❌ |
+// NOTE: Don't agree here
+| VideoHeartbeat/video-resize | ✅ | ❌ |
+| VideoHeartbeat/BufferStart | ✅ | ❌ |
+| VideoHeartbeat/Seek | ✅ | ❌ |
+| VideoHeartbeat/resume | ✅ | ✅ |
+| VideoHeartbeat/pause | ✅ | ✅ |
+| AppBackgrounded | ✅ | ✅ |
+| AppForegrounded | ✅ | ❌ |
+
+This means a session buffering for 2 minutes (with BufferStart/BufferEnd heartbeats) stays alive — the heartbeats prove the SDK is running.
 
 
 ---
@@ -347,7 +425,7 @@ WHERE event_type IN ('VideoPlay', 'AppBackgrounded', 'VideoSessionEnd', 'VideoEr
 This is the critical MV that produces +1/-1 deltas. The challenge is that a single event doesn't know the previous state — we need to compare with the session's last known state.
 
 **Approach A: Batch delta computation (recommended for hackathon)**
-
+// NOTE: we have decided to do this after a minute.
 Rather than a pure MV (which can't easily look up prior state), use a **scheduled INSERT** that runs every 30 seconds:
 
 ```sql
@@ -612,6 +690,7 @@ The unseen day dataset may have sessions that never close. Our system handles th
 | MV processing | 117 events/sec → ~20 state changes/sec | 2,000 state changes/sec | ❌ Trivial |
 | Delta generation | ~20 deltas/sec | 2,000 deltas/sec | ❌ Well within limits |
 | Session state updates | ~117/sec | 11,700/sec | ⚠️ ReplacingMergeTree handles this, but merge pressure increases |
+| Watermark timeout job | Scans ~100 active sessions | Scans ~10K active sessions | ❌ Sub-second |
 
 ### 9.2 Storage
 
@@ -634,15 +713,88 @@ The unseen day dataset may have sessions that never close. Our system handles th
 | Multi-dimension peak (all platforms, 1 hour) | ~48K | **<30ms** |
 | Full day, all dimensions | ~1.2M | **<200ms** |
 
-### 9.4 What Breaks at 1000x (900M events/day)?
+### 9.4 Scaling Plan: What Breaks at Each Level
 
+#### At 10x (9M events/day, 100K sessions)
+- **Nothing breaks.** All tables, MVs, and queries perform identically.
+- Storage grows to ~2GB/day raw → trivial.
+
+#### At 100x (90M events/day, 1M sessions)
+- **Raw table:** 20GB/day. Add `TTL toDate(...) + INTERVAL 90 DAY` for auto-cleanup.
+- **Session state merges:** 1M versions/day per session_id. Increase `merge_max_block_size`. Partition by day so merges are scoped.
+- **Batch inserts:** Switch from row-by-row to batch INSERT (10K rows per batch) to reduce part creation.
+- **OOO handling:** At this scale with distributed producers, OOO becomes likely. Batch sort approach still works (sort happens per-partition).
+
+#### At 1000x (900M events/day, 10M sessions)
 | Concern | Mitigation |
 |---------|-----------|
-| Raw table too large | Add TTL (90 days), tiered storage (hot/cold) |
-| MV lag on inserts | Batch inserts (10K rows per INSERT), async MVs |
-| Session state merges | Partition by day, increase merge threads |
-| Concurrency deltas grow | Roll up old deltas to hourly/daily granularity |
-| Content_id cardinality | Drop content_id from serving table, keep in raw only |
+| Raw table too large (200GB/day) | Tiered storage: hot (7 days SSD) → cold (S3/GCS) |
+| MV lag on inserts | Batch inserts mandatory (50K+ rows per INSERT). Consider async MV processing. |
+| Session state table size (10M rows/day) | Partition by hour (not day). Aggressive merge schedule. |
+| Concurrency deltas cardinality | Drop `content_id` from delta table (move to separate content-level table). Keep only platform + video_type + country. |
+| Window function at query time | Pre-compute cumulative sums in `concurrency_per_minute` table; queries never need window functions. |
+| Peak concurrent sessions (230K+ at 100x) | No issue for delta model — storage doesn't grow with concurrent count, only with state changes. |
+
+#### At 10,000x (9B events/day, 100M sessions) — Theoretical
+| Concern | Mitigation |
+|---------|-----------|
+| Single-node capacity | Shard by `video_session_id` across multiple nodes. Each shard processes its sessions independently. |
+| Cross-shard concurrency | Each shard emits local deltas → merge deltas at query time (additive: sum of sums = total sum). |
+| State machine memory | Move from batch query to streaming processor (Flink/Kafka Streams) feeding ClickHouse as sink. |
+| Query latency degradation | Add read replicas for query serving. Separate write path from read path. |
+
+### 9.5 Why the Delta Model Scales Linearly
+
+The key insight: **storage and compute grow with STATE CHANGES, not with events or sessions.**
+
+| Scale | Events/day | State Changes/day | Delta Rows/day | Growth Factor |
+|-------|-----------|-------------------|----------------|---------------|
+| 1x | 905K | ~63K | ~63K | baseline |
+| 100x | 90.5M | ~6.3M | ~6.3M | 100x (linear) |
+| 1000x | 905M | ~63M | ~63M | 1000x (linear) |
+
+Compare to per-minute explosion:
+| Scale | Events/day | Minute-Rows/day | Growth Factor |
+|-------|-----------|-----------------|---------------|
+| 1x | 905K | ~174K | baseline |
+| 100x | 90.5M | **17.3M** | 100x |
+| 1000x | 905M | **173M** | 1000x but each row is wider |
+
+Both grow linearly, but delta rows are **tiny** (1 int32 per row) while minute-rows need all dimension columns repeated. The delta model has ~10x better compression.
+
+### 9.6 Batch Insert Strategy (Critical for Scale)
+
+At scale, row-by-row inserts kill ClickHouse (too many small parts → merge storms).
+
+**Strategy:**
+
+```
+Events arrive → Buffer in memory/Kafka (1-10 seconds) 
+             → Batch INSERT (10K-50K rows per INSERT)
+             → MV fires on the batch
+             → Delta computation happens in batch
+```
+
+| Insert Size | Parts Created | Merge Pressure | Recommended Scale |
+|-------------|--------------|----------------|-------------------|
+| 1 row | 1 part per insert | 🔴 Catastrophic | Never in production |
+| 100 rows | 1 part per 100 | 🟡 High | Dev/testing only |
+| 10,000 rows | 1 part per 10K | 🟢 Normal | 100x scale |
+| 50,000 rows | 1 part per 50K | 🟢 Optimal | 1000x scale |
+
+For the hackathon: single bulk INSERT of all CSV data. No issue.
+For unseen day: batch the streaming data into 10K-row inserts.
+
+### 9.7 OOO at Scale
+
+| Scale | OOO Likelihood | Handling |
+|-------|---------------|----------|
+| Hackathon (batch) | Zero (we load all data at once and sort) | Sort by timestamp in query |
+| 100x (streaming) | Low (single Kafka partition per session) | Sort within batch before processing |
+| 1000x (distributed) | Moderate (multiple producers, network delays) | Session-level sorting + reconciliation |
+| 10,000x (geo-distributed) | High (cross-region replication lag) | Streaming processor with per-session state + late-arrival watermark |
+
+**Our design handles all levels:** The batch approach (sort all events by session+timestamp before computing deltas) is correct regardless of insertion order. At higher scale, you'd move the sort to the streaming processor before ClickHouse.
 
 
 ---
@@ -710,16 +862,26 @@ where ACTIVE is defined by the state machine in §5.1.
 
 ### 11.2 Known Edge Cases & Handling
 
-| Edge Case | Handling | Verified? |
-|-----------|----------|-----------|
-| Double pause (already inactive) | Idempotent: second -1 is a no-op after reconciliation | ✅ |
-| AppForegrounded without resume | No state change; stays inactive | ✅ |
-| VideoPlay after error (new session) | Different video_session_id; treated as new session | ✅ |
-| Same-ms ties (BG + pause) | Both = inactive; only one -1 emitted | ✅ |
-| 301-session anomaly user | Counted at session level (correct); user-level dedup available | ✅ |
-| Events after SessionEnd | State machine treats SessionEnd as terminal; late events ignored for that session | ✅ |
-| Buffering periods | Stays ACTIVE (buffer events don't change state) | ✅ |
-| Seek/forward/rewind | Stays ACTIVE (proof of engagement) | ✅ |
+| # | Edge Case | Frequency | Handling | Rule |
+|---|-----------|-----------|----------|------|
+| 1 | active→active (resume while playing) | 9,950 events | Skip — no delta | Rule 1 |
+| 2 | inactive→inactive (pause then BG) | 14,907 events | Skip — no delta | Rule 1 |
+| 3 | Events after SessionEnd/Error | 802 events (239 sessions) | Discard — terminal absorbs | Rule 2 |
+| 4 | AppForegrounded without resume | Thousands | No state change — FG is always no-op | Rule 3 |
+| 5 | Duplicate SessionStart/Play/End | 13-16 sessions | Idempotent (same implied state) | Rule 1 |
+| 6 | 120 shared sessions (2 users) | 120 sessions | Count at session level | By design |
+| 7 | 301-session bot user | 1 user | Count all sessions individually | By design |
+| 8 | Zero-duration sessions | 12 sessions | +1 and -1 in same minute = net 0 | Natural |
+| 9 | 43-hour session (multi-day gap) | 1 session | Timeout at +90s, re-activate on resume | Rule 1 + timeout |
+| 10 | Mismatched BG/FG counts (407 unpaired) | 466 sessions | Already inactive; timeout handles | Timeout job |
+| 11 | Same-ms timestamp ties | 894 events | Deterministic tie-breaking order | Sort order |
+| 12 | OOO events (0 in data, defensive) | 0 observed | Sort by event_timestamp before processing | Defensive sort |
+| 13 | Late arrivals (up to 35 min after End) | 802 events | Terminal state absorbs; no re-activation | Rule 2 |
+| 14 | Buffering >90s (long buffer) | Handful | Any heartbeat resets liveness clock | Liveness design |
+| 15 | Empty/null dimensions | ~2,000 events | Map to 'unknown', never drop | Normalization |
+| 16 | Audio language variants (hin/HIN/hin-hindi) | 41 variants | Normalize at ingestion | Normalization |
+| 17 | Sessions resuming after timeout | Rare | Normal state machine: inactive→active = +1 | Self-healing |
+| 18 | Content_id switch mid-session | 1 session | Use first content_id as canonical | By design |
 
 ### 11.3 Validation Query (Sanity Check)
 
@@ -880,7 +1042,27 @@ This is correct and fast enough. Incremental/streaming is the "great" version.
 | Peak FG concurrent | 2,316 sessions | Ground truth anchor |
 | Event window | 10:30–11:30 UTC | 60-minute live event |
 | Platforms peak at different minutes | 10:43 to 11:03 | Can't pre-aggregate across dimensions |
-| Sessions with late events | 2.2% | Need 35-min watermark |
+| Sessions with late events | 2.2% (239 sessions) | Terminal absorbs — no watermark needed |
+| Out-of-order events | **0 observed** | Sort defensively for unseen day |
+| Duplicate transitions to filter | 25,768 events | Rule 1 prevents 25K wrong deltas |
+| Post-terminal events to discard | 802 events | Rule 2 prevents dead sessions reviving |
 | Median pause duration | 7.3 sec | Short pauses are common |
 | Median BG duration | 35 sec | Significant — must exclude |
 | All sessions have BG+pause | 90% | Core problem, not edge case |
+| Max late arrival after End | 35 minutes | Terminal state handles it (no special watermark) |
+| Sessions with same-ms ties | 894 state events | Tie-breaking sort order handles |
+| Shared session_ids (2 users) | 120 sessions | Count at session level |
+| 301-session anomaly user | 4.7% of peak | Flag but don't exclude |
+
+---
+
+## 17. Document Cross-References
+
+| Document | Contains | Location |
+|----------|----------|----------|
+| DATA_ANALYSIS-ROHIT.md | Full dataset analysis, all metrics, state machine definition | `Docs/` |
+| EDGE_CASES.md | 33 edge cases, complete state machine code, verification queries | `Docs/` |
+| ARCHITECTURE-ROHIT.md | This document — tables, MVs, scaling, implementation | `Docs/` |
+| PROBLEM_STATEMENT.md | Original requirements and evaluation criteria | `Base/SonyLiv/` |
+| dataset_details.md | Column definitions and data dictionary | `Base/SonyLiv/` |
+
