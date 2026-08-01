@@ -191,6 +191,30 @@ Naive sum → 2 people in minute 10.   WRONG. It's 1 person.
 We found **4,854** of these phantom `+1`s. They pushed peak from the true 2,697 up to
 2,902.
 
+**This happens a lot.** Any of these inside a single minute causes it:
+
+```
+BG → FG           user glances at a notification and comes back
+pause → play      user pauses and resumes
+pause → play → pause → play    ...twice
+```
+
+**12.75%** of all session-minutes (3,476 of 27,268) contain more than one active
+interval. Worst case in the real data: **21 intervals in one minute**. Pause/resume churn
+is the main cause — pure background churn is rarer, because backgrounding usually lasts
+past a minute boundary.
+
+Tested with deliberately injected patterns (`out_10.txt`):
+
+| Pattern in one minute | Intervals | Counted as |
+|---|---|---|
+| `BG → FG` | 2 | **1** ✓ |
+| `pause → play → pause → play` | 3 | **1** ✓ |
+| 10 rapid flips | 6 | **1** ✓ |
+| `BG` and `FG` in the same millisecond | 1 | **1** ✓ |
+
+Without the dedupe step those 7 test sessions would report **15 viewers instead of 7**.
+
 **The fix — three small steps:**
 
 ```
@@ -387,7 +411,7 @@ The same question has three honest answers:
 | average over every minute in the range (including empty ones) | **7.47** |
 | time-weighted (credit partial minutes properly) | **28.99** |
 
-A **4x spread**. It happens because 50.1% of active intervals are shorter than one
+A **4.7x spread**. It happens because 50.1% of active intervals are shorter than one
 minute — so "was this person here for the whole minute?" genuinely matters.
 
 **Pick one, write it in the API docs, and state it next to the number.**
@@ -566,6 +590,8 @@ CLICKHOUSE                   │                             │
 | Edge case census with policies | `analysis/out_04.txt` |
 | Open sessions, incrementality | `analysis/out_05.txt` |
 | Table sizing by dimension set | `analysis/out_06.txt` |
+| Edge case audit (16 PASS / 3 GAP / 0 FAIL) | `analysis/out_09.txt` |
+| **Intra-minute flapping (BG/FG, pause/play churn)** | `analysis/out_10.txt` |
 
 Reproduce everything: `cd analysis && ./run_all.sh --fresh`
 
