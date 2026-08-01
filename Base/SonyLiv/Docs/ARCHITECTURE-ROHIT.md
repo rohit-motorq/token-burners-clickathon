@@ -309,6 +309,7 @@ ORDER BY
     event_timestamp,
     -- Tie-breaking for same-millisecond events:
     multiIf(
+        // NOTE: include this in our design
         event_type = 'VideoSessionStart', 1,
         event_type = 'VideoPlay', 2,
         event_type = 'VideoHeartbeat' AND event = 'resume', 3,
@@ -336,6 +337,7 @@ ORDER BY
 
 **Solution: Watermark-based cleanup job (runs every 60 seconds)**
 
+// NOTE: we missed this in our design
 ```sql
 -- Find sessions that timed out and emit -1 deltas
 INSERT INTO concurrency_deltas (minute, platform, country, video_type, category, content_id, session_delta, user_delta)
@@ -364,6 +366,7 @@ ANY event from the session resets the 90-second timeout, not just state-changing
 |-------|:---:|:---:|
 | VideoHeartbeat/buffer-health | ✅ | ❌ |
 | VideoHeartbeat/network-activity | ✅ | ❌ |
+// NOTE: Don't agree here
 | VideoHeartbeat/video-resize | ✅ | ❌ |
 | VideoHeartbeat/BufferStart | ✅ | ❌ |
 | VideoHeartbeat/Seek | ✅ | ❌ |
@@ -422,7 +425,7 @@ WHERE event_type IN ('VideoPlay', 'AppBackgrounded', 'VideoSessionEnd', 'VideoEr
 This is the critical MV that produces +1/-1 deltas. The challenge is that a single event doesn't know the previous state — we need to compare with the session's last known state.
 
 **Approach A: Batch delta computation (recommended for hackathon)**
-
+// NOTE: we have decided to do this after a minute.
 Rather than a pure MV (which can't easily look up prior state), use a **scheduled INSERT** that runs every 30 seconds:
 
 ```sql
