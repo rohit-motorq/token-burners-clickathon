@@ -2,6 +2,12 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+mkdir -p reports
+STAMP=$(date +%Y%m%d_%H%M%S)
+RAW_LOG="reports/raw_${STAMP}.log"
+REPORT="reports/report_${STAMP}.md"
+
+main() {
 echo "== 1. Data expectations (live raw data vs EDA doc claims) =="
 python3 data_expectations.py
 d_status=$?
@@ -52,9 +58,29 @@ echo "== 10. Edge cases (Docs/EDGE_CASES.md — flapping, terminal absorption, d
 python3 test_edge_cases.py
 e_status=$?
 
+echo
+echo "== 11. Minute-by-minute actual-vs-computed curve (sustained-peak hour, see Docs/CONCURRENCY_VALIDATION.md) =="
+python3 test_minute_series.py
+m_status=$?
+
 if [ "$d_status" -ne 0 ] || [ "$s_status" -ne 0 ] || [ "$o_status" -ne 0 ] || [ "$b_status" -ne 0 ] \
    || [ "$r_status" -ne 0 ] || [ "$g_status" -ne 0 ] || [ "$l_status" -ne 0 ] || [ "$p_status" -ne 0 ] \
-   || [ "$e_status" -ne 0 ]; then
+   || [ "$e_status" -ne 0 ] || [ "$m_status" -ne 0 ]; then
+  return 1
+fi
+return 0
+}
+
+main 2>&1 | tee "$RAW_LOG"
+run_status=${PIPESTATUS[0]}
+
+python3 gen_report.py "$RAW_LOG" "$REPORT"
+report_status=$?
+
+echo
+echo "report: $REPORT"
+
+if [ "$run_status" -ne 0 ] || [ "$report_status" -ne 0 ]; then
   exit 1
 fi
 exit 0

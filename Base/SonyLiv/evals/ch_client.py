@@ -9,12 +9,14 @@ import uuid
 CH_URL = os.environ.get("CH_URL", "https://mg6ws6jmpr.ap-south-1.aws.clickhouse.cloud:8443")
 CH_USER = os.environ.get("CH_USER", "default")
 CH_PASS = os.environ.get("CH_PASS", "DApBb4.O_9tqI")
+CH_DATABASE = os.environ.get("CH_DATABASE", "rohitdevtesting")
 
 
 def query(sql, fmt="JSONEachRow", query_id=None):
-    url = CH_URL
+    params = {"database": CH_DATABASE}
     if query_id:
-        url = url + "?" + urllib.parse.urlencode({"query_id": query_id})
+        params["query_id"] = query_id
+    url = CH_URL + "?" + urllib.parse.urlencode(params)
     body = (sql.strip() + f"\nFORMAT {fmt}").encode()
     req = urllib.request.Request(url, data=body, method="POST")
     auth = f"{CH_USER}:{CH_PASS}".encode()
@@ -29,7 +31,8 @@ def query(sql, fmt="JSONEachRow", query_id=None):
 
 def _exec_raw(sql):
     """For statements that reject a FORMAT clause (e.g. SYSTEM FLUSH LOGS)."""
-    req = urllib.request.Request(CH_URL, data=sql.strip().encode(), method="POST")
+    url = CH_URL + "?" + urllib.parse.urlencode({"database": CH_DATABASE})
+    req = urllib.request.Request(url, data=sql.strip().encode(), method="POST")
     auth = f"{CH_USER}:{CH_PASS}".encode()
     import base64
     req.add_header("Authorization", "Basic " + base64.b64encode(auth).decode())

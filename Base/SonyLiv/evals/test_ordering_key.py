@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Design-quality check: does the actual ORDER BY / engine match what LLD-sam.md
-§2 specifies and what every "prefix seek" claim in the design docs depends
-on? Column presence (test_schema.py) isn't enough — LLD-sam.md §1.5 is
-explicit that ORDER BY column ORDER is the index; content_id first in
-cc_delta_content vs platform first in cc_delta_dims is the entire reason
-drill-down and dashboard-default queries are each fast for their own shape.
-A rename or a reordering during implementation would silently break every
-"reads ~5 rows" claim without touching a single column name.
+Design-quality check: does the actual ORDER BY / engine match what
+src/migrationv2/migrations/*.sql specifies? Column presence (test_schema.py)
+isn't enough — ORDER BY column ORDER is the index. v2 leads cc_delta_content
+with minute (not content_id) since the dims-only rollup table was dropped
+and this table now serves both the drill-down and the dashboard-default
+query shape by itself. A rename or a reordering during implementation would
+silently break every "reads ~5 rows" claim without touching a single column
+name.
 
 ClickHouse Cloud reports "Shared*" engine variants (compute-storage
 separation transparently substitutes SharedMergeTree for MergeTree, etc.) —
@@ -17,22 +17,19 @@ import sys
 
 from ch_client import query, table_exists
 from table_names import (
-    CC_DELTA_CONTENT, CC_DELTA_DIMS, CC_SI_MINUTE, SESSION_STATE,
-    SESSION_RUNS, PIPELINE_CURSOR, CONTENT_DIM_IMPL, EVENTS_RAW_IMPL,
+    CC_DELTA_CONTENT, SESSION_ACTIVE, PIPELINE_CHECKPOINT,
+    CONTENT_DIM_IMPL, EVENTS_RAW_IMPL,
 )
 
 RESULTS = {"pass": 0, "fail": 0, "skip": 0}
 
-# table -> (expected ORDER BY tuple, expected base engine) per LLD §2 DDL
+# table -> (expected ORDER BY tuple, expected base engine) per src/migrationv2/migrations/*.sql DDL
 EXPECTED = {
-    EVENTS_RAW_IMPL: (("video_session_id", "event_ts"), "MergeTree"),
+    EVENTS_RAW_IMPL: (("video_session_id", "event_ts", "event_type", "event"), "ReplacingMergeTree"),
     CONTENT_DIM_IMPL: (("content_id",), "ReplacingMergeTree"),
-    SESSION_STATE: (("video_session_id",), "ReplacingMergeTree"),
-    CC_DELTA_CONTENT: (("content_id", "platform", "country", "video_type", "category", "minute"), "SummingMergeTree"),
-    CC_DELTA_DIMS: (("platform", "country", "video_type", "category", "minute"), "SummingMergeTree"),
-    CC_SI_MINUTE: (("platform", "country", "video_type", "content_id", "minute"), "AggregatingMergeTree"),
-    SESSION_RUNS: (("video_session_id", "run_start"), "MergeTree"),
-    PIPELINE_CURSOR: (("name",), "ReplacingMergeTree"),
+    SESSION_ACTIVE: (("last_seen", "video_session_id"), "ReplacingMergeTree"),
+    CC_DELTA_CONTENT: (("minute", "content_id", "platform", "country", "video_type", "category"), "SummingMergeTree"),
+    PIPELINE_CHECKPOINT: (("pipeline_name",), "ReplacingMergeTree"),
 }
 
 
