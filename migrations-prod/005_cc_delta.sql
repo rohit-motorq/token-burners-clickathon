@@ -1,8 +1,7 @@
--- Migration 005: Concurrency deltas fact table + recompute MV
+-- Migration 005: Concurrency deltas fact table + recompute MV + checkpoint advance
 --
 -- Stores per-session +1/-1 deltas. Content-derived dimensions (video_type,
--- category, show_name) are NOT stored here — look them up via dict_content
--- at query time using content_id. Keeps the table lean and schema-change-proof.
+-- category, show_name) NOT stored — look up via dict_content at query time.
 
 CREATE TABLE IF NOT EXISTS fact_concurrency_deltas
 (
@@ -12,9 +11,9 @@ CREATE TABLE IF NOT EXISTS fact_concurrency_deltas
     platform         LowCardinality(String),
     country          LowCardinality(String),
     video_resolution LowCardinality(String) DEFAULT 'unknown',
-    content_id       UInt64,
-    delta_sessions   Int8,           -- +1/-1 for active (fg AND playing AND fresh)
-    delta_open       Int8,           -- +1/-1 for open (between START and END/timeout)
+    content_id       Int64,
+    delta_sessions   Int8,
+    delta_open       Int8,
     computed_at      DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(computed_at)
@@ -24,18 +23,18 @@ TTL toDate(minute) + INTERVAL 45 DAY
 SETTINGS index_granularity = 8192;
 
 
+-- Main concurrency MV: processes only sessions pending since last checkpoint
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_compute_concurrency
 REFRESH EVERY 30 SECOND APPEND
 TO fact_concurrency_deltas
 AS
 WITH
--- Step 1: Which sessions changed?
 changed AS (
     SELECT DISTINCT video_session_id
     FROM raw_sessions_pending
+    WHERE ingest_ts > (SELECT last_processed_ts FROM processing_checkpoint FINAL WHERE id = 1)
+      AND ingest_ts <= now64(3) - INTERVAL 5 SECOND
 ),
-
--- Step 2: Full history for dirty sessions
 deduped AS (
     SELECT DISTINCT
         video_session_id, user_id, event_ts, event_type, event,
@@ -43,8 +42,6 @@ deduped AS (
     FROM fact_events
     WHERE video_session_id IN (SELECT video_session_id FROM changed)
 ),
-
--- Step 3: Classify to 9-signal alphabet
 classified AS (
     SELECT video_session_id, user_id, platform, country, content_id, video_resolution, event_ts,
         CASE
@@ -71,8 +68,6 @@ classified AS (
         END AS tie_break
     FROM deduped
 ),
-
--- Step 4: Collapse to one sorted array per session
 sorted AS (
     SELECT
         video_session_id,
@@ -87,8 +82,6 @@ sorted AS (
     FROM classified
     GROUP BY video_session_id
 ),
-
--- Step 5: Three independent gates
 gates AS (
     SELECT
         video_session_id, user_id, platform, country, content_id, video_resolution,
@@ -101,8 +94,6 @@ gates AS (
         arrayCumSum(arrayMap(s -> if(s='END',1,0), arrayMap(y->y.3, ev))) AS ended
     FROM sorted
 ),
-
--- Step 6: Segment + liveness cap + active flag
 segmented AS (
     SELECT
         video_session_id, user_id, platform, country, content_id, video_resolution,
@@ -115,8 +106,6 @@ segmented AS (
                  arrayEnumerate(ts_arr)) AS is_active
     FROM gates
 ),
-
--- Step 7: Extract active segments
 active_segments AS (
     SELECT
         video_session_id, user_id, platform, country, content_id, video_resolution,
@@ -126,8 +115,6 @@ active_segments AS (
     ARRAY JOIN arrayFilter(x -> x.3=1,
         arrayMap(i -> (ts_arr[i], seg_end[i], is_active[i]), arrayEnumerate(ts_arr))) AS seg
 ),
-
--- Step 8: Explode to minutes + deduplicate per (session, minute)
 active_session_minutes AS (
     SELECT DISTINCT
         video_session_id, user_id, platform, country, content_id, video_resolution,
@@ -139,15 +126,12 @@ active_session_minutes AS (
         )) AS minute
     FROM active_segments
 ),
-
--- Step 9: Merge contiguous minutes into runs
 active_with_groups AS (
     SELECT *,
         toInt64(toUnixTimestamp(minute)) -
             toInt64(row_number() OVER (PARTITION BY video_session_id ORDER BY minute)) * 60 AS run_group
     FROM active_session_minutes
 ),
-
 active_runs AS (
     SELECT video_session_id, user_id, platform, country, content_id, video_resolution,
            session_first_event, session_last_event,
@@ -156,8 +140,6 @@ active_runs AS (
     GROUP BY video_session_id, user_id, platform, country, content_id, video_resolution,
              session_first_event, session_last_event, run_group
 ),
-
--- Step 10: Active deltas (+1 at run start, -1 at run end)
 active_deltas AS (
     SELECT video_session_id, user_id, run_start AS minute,
            platform, country, video_resolution, content_id,
@@ -169,8 +151,6 @@ active_deltas AS (
            toInt8(-1) AS delta_sessions, toInt8(0) AS delta_open
     FROM active_runs
 ),
-
--- Step 11: Open session deltas (+1 at start, -1 at last_event+90s)
 open_deltas AS (
     SELECT DISTINCT video_session_id, user_id,
         toStartOfMinute(session_first_event) AS minute,
@@ -184,14 +164,11 @@ open_deltas AS (
         toInt8(0) AS delta_sessions, toInt8(-1) AS delta_open
     FROM sorted
 ),
-
--- Step 12: Combine + merge at same (session, minute)
 all_deltas AS (
     SELECT * FROM active_deltas
     UNION ALL
     SELECT * FROM open_deltas
 ),
-
 merged_deltas AS (
     SELECT
         video_session_id, any(user_id) AS user_id, minute,
@@ -202,16 +179,16 @@ merged_deltas AS (
     FROM all_deltas
     GROUP BY video_session_id, minute
 ),
-
--- Step 13: Tombstones for stale minutes
+-- Full range: emit a row for EVERY minute in the session's span.
+-- Minutes with no delta get 0. This overwrites any stale rows from prior cycles
+-- without needing a separate tombstone step.
 session_ranges AS (
     SELECT DISTINCT
         video_session_id, user_id, platform, country, content_id, video_resolution,
         session_first_event, session_last_event
     FROM sorted
 ),
-
-tombstone_minutes AS (
+full_range AS (
     SELECT
         video_session_id, user_id, platform, country, content_id, video_resolution,
         arrayJoin(arrayMap(x -> toStartOfMinute(session_first_event) + toIntervalMinute(x),
@@ -222,21 +199,32 @@ tombstone_minutes AS (
         )) AS minute
     FROM session_ranges
 ),
-
-tombstones AS (
-    SELECT t.video_session_id, t.user_id, t.minute,
-           t.platform, t.country, t.video_resolution, t.content_id,
-           toInt8(0) AS delta_sessions, toInt8(0) AS delta_open
-    FROM tombstone_minutes t
-    LEFT ANTI JOIN merged_deltas m
-        ON m.video_session_id = t.video_session_id AND m.minute = t.minute
+-- Join full range with actual deltas: minutes with deltas get their values,
+-- minutes without get 0/0 (overwrites stale data from prior computations)
+output AS (
+    SELECT
+        fr.video_session_id, fr.user_id, fr.minute,
+        fr.platform, fr.country, fr.video_resolution, fr.content_id,
+        coalesce(md.delta_sessions, toInt8(0)) AS delta_sessions,
+        coalesce(md.delta_open, toInt8(0)) AS delta_open
+    FROM full_range fr
+    LEFT JOIN merged_deltas md
+        ON md.video_session_id = fr.video_session_id AND md.minute = fr.minute
 )
+SELECT video_session_id, user_id, minute, platform, country, video_resolution,
+       content_id, delta_sessions, delta_open, now64(3) AS computed_at
+FROM output;
 
--- Output
-SELECT video_session_id, user_id, minute, platform, country, video_resolution,
-       content_id, delta_sessions, delta_open, now64(3) AS computed_at
-FROM merged_deltas
-UNION ALL
-SELECT video_session_id, user_id, minute, platform, country, video_resolution,
-       content_id, delta_sessions, delta_open, now64(3) AS computed_at
-FROM tombstones;
+
+-- Checkpoint advance MV: fires 10s after the main MV
+-- Advances to max(ingest_ts) that was within the processable window
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_advance_checkpoint
+REFRESH EVERY 30 SECOND OFFSET 10 SECOND APPEND
+TO processing_checkpoint
+AS
+SELECT
+    toUInt8(1) AS id,
+    max(ingest_ts) AS last_processed_ts,
+    now64(3) AS updated_at
+FROM raw_sessions_pending
+WHERE ingest_ts <= now64(3) - INTERVAL 5 SECOND;
