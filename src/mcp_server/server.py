@@ -36,41 +36,45 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def get_concurrency_curve(platform: str = None, country: str = None, video_type: str = None,
-                           category: str = None, content_id: int = None,
+def get_concurrency_curve(platform: str = None, country: str = None, video_resolution: str = None,
+                           video_type: str = None, category: str = None, content_id: int = None,
                            start: str = None, end: str = None, grain: str = "minute") -> list:
     """Concurrency curve for a time range + optional dimension filter. grain: minute|hour|day."""
-    dims = {k: v for k, v in {"platform": platform, "country": country, "video_type": video_type,
+    dims = {k: v for k, v in {"platform": platform, "country": country,
+                               "video_resolution": video_resolution, "video_type": video_type,
                                "category": category, "content_id": content_id}.items() if v is not None}
     return concurrency.get_concurrency_curve(dims, start, end, grain)
 
 
 @mcp.tool()
-def get_peak(platform: str = None, country: str = None, video_type: str = None,
-             category: str = None, content_id: int = None,
+def get_peak(platform: str = None, country: str = None, video_resolution: str = None,
+             video_type: str = None, category: str = None, content_id: int = None,
              start: str = None, end: str = None, grain: str = "minute") -> dict:
     """Peak concurrency + the bucket it occurred in, for a time range + filter."""
-    dims = {k: v for k, v in {"platform": platform, "country": country, "video_type": video_type,
+    dims = {k: v for k, v in {"platform": platform, "country": country,
+                               "video_resolution": video_resolution, "video_type": video_type,
                                "category": category, "content_id": content_id}.items() if v is not None}
     return concurrency.get_peak(dims, start, end, grain)
 
 
 @mcp.tool()
-def get_trend(platform: str = None, country: str = None, video_type: str = None,
-              category: str = None, content_id: int = None,
+def get_trend(platform: str = None, country: str = None, video_resolution: str = None,
+              video_type: str = None, category: str = None, content_id: int = None,
               end: str = None, lookback_minutes: int = 10) -> dict:
     """Rate of change (direction/slope/delta_pct) over the last N minute-buckets ending at `end`."""
-    dims = {k: v for k, v in {"platform": platform, "country": country, "video_type": video_type,
+    dims = {k: v for k, v in {"platform": platform, "country": country,
+                               "video_resolution": video_resolution, "video_type": video_type,
                                "category": category, "content_id": content_id}.items() if v is not None}
     return concurrency.get_trend(dims, end, lookback_minutes)
 
 
 @mcp.tool()
 def get_content_metadata(content_id: int) -> dict:
-    """Title/video_type/category + estimated end time for a content_id.
-    scheduled_end_ts is ALWAYS an inference from session_runs, never a real
-    programming schedule (end_ts_is_estimated is always true) — relay it as
-    an inference, not a fact."""
+    """Title/video_type/category/show_name + estimated end time for a content_id.
+    scheduled_end_ts is ALWAYS an inference from past session activity, never
+    a real programming schedule (end_ts_is_estimated is always true, and
+    scheduled_end_ts is None until at least one session for this content has
+    ended) — relay it as an inference, not a fact."""
     return content.get_content_metadata(content_id)
 
 

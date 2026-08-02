@@ -1,7 +1,7 @@
 """SA <= SI invariant check (LLD §8.4/§12.6) — distinguishes a real
 system/pipeline issue from an organic concurrency drop.
 
-NOT AVAILABLE under the migrationv2 schema (rohitdevtesting, the current
+NOT AVAILABLE under migrations-prod (rohitdevtesting, the current
 CH_DATABASE default): that pipeline tracks only a single is_active state,
 no separate session-independent presence sketch (cc_delta_dims and
 cc_si_minute both don't exist there). Deliberately NOT registered in

@@ -1,0 +1,14 @@
+.venv
+Base
+data
+ui
+node_modules
+logs
+*.pyc
+*.log
+*.csv
+migrations-prod
+migrationv2
+scripts
+design
+ingestion

@@ -1,7 +1,7 @@
 """DIAGNOSTIC genre tool — error rate / heartbeat-gap signal.
 
 ponytail: no ClickStack otel table exists yet (Phase 7 of the plan). Placeholder
-computes error/buffer rate straight from events_raw, which already carries
+computes error/buffer rate straight from fact_events, which already carries
 enrichment columns. Swap the FROM/WHERE here for ClickStack's ingested table
 once that service is stood up and its schema is known — same return shape."""
 from ..observability import observe
@@ -15,7 +15,7 @@ def get_health_signals(content_id: int, start: str, end: str) -> dict:
             countIf(event_type = 'VideoError') AS error_events,
             countIf(event_type = 'VideoHeartbeat' AND event = 'BufferStart') AS buffer_events,
             count() AS total_events
-        FROM events_raw
+        FROM fact_events
         WHERE content_id = {content_id:UInt64}
           AND event_ts >= {start:DateTime}
           AND event_ts < {end:DateTime}

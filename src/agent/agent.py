@@ -29,7 +29,7 @@ def _reference_now() -> str | None:
     second string (ClickHouse 500s on it). Truncate here rather than widen
     every tool's param type, since this is the only source of sub-second
     timestamps the model ever sees."""
-    rows = ch_client.query("SELECT max(event_ts) AS mx FROM events_raw")
+    rows = ch_client.query("SELECT max(event_ts) AS mx FROM fact_events")
     mx = rows[0]["mx"] if rows and rows[0].get("mx") else None
     return mx.split(".")[0] if mx else None
 
@@ -43,14 +43,20 @@ def _known_dim_values() -> str | None:
     against the unseen-day dataset, which may have different values, rather
     than going stale against a snapshot taken during development.
 
+    platform/country come from fact_concurrency_deltas (event dims, direct
+    columns there); video_type comes from dim_content instead — under
+    migrations-prod, video_type/category are content-derived and were
+    dropped from fact_concurrency_deltas entirely (filtered via dictGet at
+    query time, see tools/concurrency.py).
+
     category is deliberately NOT enumerated here: 84 distinct values, all
     opaque codes (e.g. "cdbgg"), not human-readable, and too many to list
     cheaply in every prompt — the model is told to treat category as opaque
     and look a specific content's category up via get_content_metadata
     rather than guess a value for it."""
-    platforms = ch_client.query("SELECT DISTINCT platform FROM cc_delta_content")
-    video_types = ch_client.query("SELECT DISTINCT video_type FROM cc_delta_content")
-    countries = ch_client.query("SELECT DISTINCT country FROM cc_delta_content")
+    platforms = ch_client.query("SELECT DISTINCT platform FROM fact_concurrency_deltas")
+    video_types = ch_client.query("SELECT DISTINCT video_type FROM dim_content")
+    countries = ch_client.query("SELECT DISTINCT country FROM fact_concurrency_deltas")
     if not platforms:
         return None
     platform_list = ", ".join(r["platform"] for r in platforms)
@@ -72,6 +78,7 @@ def _known_dim_values() -> str | None:
 _DIM_PARAMS = {
     "platform": {"type": "string"},
     "country": {"type": "string"},
+    "video_resolution": {"type": "string"},
     "video_type": {"type": "string"},
     "category": {"type": "string"},
     "content_id": {"type": "integer"},
@@ -117,7 +124,7 @@ TOOL_SCHEMAS = {
         },
     },
     "get_content_metadata": {
-        "description": "Title/video_type/category/scheduled_end_ts for a content_id.",
+        "description": "Title/video_type/category/show_name/scheduled_end_ts for a content_id.",
         "input_schema": {
             "type": "object",
             "properties": {"content_id": {"type": "integer"}},
@@ -137,7 +144,7 @@ TOOL_SCHEMAS = {
         },
     },
     # get_si_sa_gap deliberately not registered here — cc_delta_dims/cc_si_minute
-    # don't exist under the migrationv2 schema (rohitdevtesting). See
+    # don't exist under migrations-prod (rohitdevtesting) either. See
     # src/agent/tools/validation.py and INNER_CONTEXT.md.
     "get_billable_impressions": {
         "description": "Estimated billable impressions for an advertiser over a time range. Not authoritative for invoicing.",

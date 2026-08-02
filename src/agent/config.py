@@ -15,9 +15,12 @@ except ImportError:
 CH_URL = os.environ.get("CH_URL", "https://mg6ws6jmpr.ap-south-1.aws.clickhouse.cloud:8443")
 CH_USER = os.environ.get("CH_USER", "default")
 CH_PASS = os.environ.get("CH_PASS", "")
-# rohitdevtesting runs the migrationv2 pipeline (src/migrationv2/migrations) —
-# the authoritative schema going forward, see INNER_CONTEXT.md.
-CH_DATABASE = os.environ.get("CH_DATABASE", "rohitdevtesting")
+# rohitdevtestingv8 is the final target DB, migrations-prod schema (repo-root
+# migrations-prod/*.sql) — the authoritative schema going forward. Ingestion
+# into v8 may still be catching up; rohitdevtesting/v2-v6 are earlier schema
+# iterations (migrationv2 and prior, or interim copies), do not point back
+# at those once v8 has data.
+CH_DATABASE = os.environ.get("CH_DATABASE", "rohitdevtestingv8")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-5")

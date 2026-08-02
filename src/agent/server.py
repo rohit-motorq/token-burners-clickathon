@@ -12,8 +12,10 @@ from .agent import answer, _reference_now
 from . import chart_store
 from .tools import concurrency, dashboard
 from .observability import get_client, enabled as _langfuse_enabled
+from .dashboard_api import router as dashboard_api_router
 
 app = FastAPI()
+app.include_router(dashboard_api_router)
 
 
 def _sample_dashboard_reply() -> str:
