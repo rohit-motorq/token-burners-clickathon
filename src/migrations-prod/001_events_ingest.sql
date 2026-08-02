@@ -1,6 +1,7 @@
--- Migration 001: Null engine ingestion endpoint
--- Matches the raw Kafka/JSON format exactly (strings for timestamps and content_id).
-CREATE TABLE IF NOT EXISTS events_ingest
+-- Migration 001: Raw ingestion endpoint (Null engine)
+-- Matches Kafka/JSON format exactly. All strings, conversion happens downstream.
+
+CREATE TABLE IF NOT EXISTS raw_events_ingest
 (
     video_session_id  String,
     user_id           String,
