@@ -1,13 +1,17 @@
-"""LOOKUP + TREND genre tools. Reads cc_delta_content, whose ORDER BY is
-(minute, content_id, platform, country, video_type, category) — time-range-
-first, so every query here filters on minute first and treats dims as
-secondary filters.
+"""LOOKUP + TREND genre tools. Reads fact_concurrency_deltas, whose ORDER BY
+is (minute, video_session_id) — time-range-first, so every query here
+filters on minute first and treats dims as secondary filters.
 
-No narrow cc_delta_dims table exists under the migrationv2 schema (the
-authoritative pipeline on rohitdevtesting, see INNER_CONTEXT.md) — every
-query reads cc_delta_content directly, even without a content_id filter.
-Still minute-range-bounded either way, just no separate narrow projection
-for the no-content-filter case."""
+migrations-prod (the authoritative schema, see INNER_CONTEXT.md) keeps
+fact_concurrency_deltas lean: platform/country/video_resolution are direct
+columns, but video_type/category are content-derived and NOT stored on this
+table — they're looked up via dictGet('dict_content', ..., content_id) at
+query time, same dictionary get_content_metadata reads from.
+
+No narrow cc_delta_dims table exists — every query reads
+fact_concurrency_deltas directly, even without a content_id filter. Still
+minute-range-bounded either way, just no separate narrow projection for the
+no-content-filter case."""
 from ..observability import observe
 from .. import ch_client
 
@@ -17,7 +21,8 @@ _GRAIN_EXPR = {
     "day": "toStartOfDay(minute)",
 }
 
-_DIM_COLUMNS = ("platform", "country", "video_type", "category")
+_DIM_COLUMNS = ("platform", "country", "video_resolution")
+_DICT_DIM_COLUMNS = ("video_type", "category")
 
 
 def _dim_where_clause(dims: dict, params: dict) -> str:
@@ -28,11 +33,18 @@ def _dim_where_clause(dims: dict, params: dict) -> str:
     — this exact bug: computed=4 instead of the correct 54 at 10:00 for a
     10:00-11:00 window, because the running sum never saw the deltas from
     before 10:00). The time window must only ever be applied to the *output*
-    of the cumulative sum, after it has run from the true beginning."""
+    of the cumulative sum, after it has run from the true beginning.
+
+    video_type/category aren't columns here — filtered via dictGet on
+    content_id against dict_content instead."""
     clauses = []
     for col in _DIM_COLUMNS:
         if dims.get(col):
             clauses.append(f"{col} = {{{col}:String}}")
+            params[col] = dims[col]
+    for col in _DICT_DIM_COLUMNS:
+        if dims.get(col):
+            clauses.append(f"dictGet('dict_content', '{col}', content_id) = {{{col}:String}}")
             params[col] = dims[col]
     if dims.get("content_id"):
         clauses.append("content_id = {content_id:UInt64}")
@@ -42,23 +54,61 @@ def _dim_where_clause(dims: dict, params: dict) -> str:
 
 @observe(as_type="tool")
 def get_concurrency_curve(dims: dict, start: str, end: str, grain: str = "minute") -> list[dict]:
-    """Minute/hour/day concurrency curve for a time range + dimension filter."""
+    """Minute/hour/day concurrency curve for a time range + dimension filter.
+
+    FINAL on fact_concurrency_deltas: mv_compute_concurrency is a
+    REFRESH...APPEND materialized view, and ReplacingMergeTree's background
+    merge/dedup is async — without FINAL, a session recomputed more than
+    once (dirty-session reprocessing) shows up as duplicate +1/-1 rows that
+    haven't merged away yet, and sum(delta_sessions) double-counts them.
+    Confirmed against rohitdevtestingv8: ~13% of rows are such unmerged
+    duplicates (406,782 raw vs 352,238 after FINAL over the full history at
+    time of writing). FINAL was also faster in that same test, so this
+    isn't a tradeoff at current data volumes — revisit if the table grows
+    large enough that FINAL's cost starts to dominate.
+
+    ORDER BY minute WITH FILL zero-fills every minute with no delta activity,
+    so the running sum is dense at minute resolution (not just the minutes a
+    session started or ended in) before any downsampling happens. FROM/TO is
+    bound to the same start/end params as the outer filter — safe because
+    WITH FILL only adds synthetic gap rows inside that range, it never
+    removes the real (unfiltered) rows before `start` that the running sum
+    still needs to carry the correct cumulative value into the window (see
+    _dim_where_clause docstring — same rule, WITH FILL doesn't change it).
+
+    hour/day grain always computes the full minute-resolution curve first,
+    then takes max(concurrency) per hour/day bucket — NOT concurrency at the
+    bucket's start instant. That distinction matters a lot for bursty
+    traffic: toStartOfDay(minute) as the running-sum's own grouping grain
+    reports whatever the value happened to be exactly at midnight, which for
+    a short live-content spike is usually ~0 even on a day that peaked at
+    18,000+ mid-afternoon — confirmed this exact case against
+    rohitdevtestingv8 (day-grain snapshot showed peak=2 for a month that
+    genuinely peaked at 18,255). Peak-per-bucket is the correct downsample
+    for a concurrency chart; a snapshot-per-bucket silently aliases away
+    every spike that isn't still running at the bucket boundary."""
     params: dict = {"start": start, "end": end}
     dim_where = _dim_where_clause(dims, params)
     bucket = _GRAIN_EXPR.get(grain, "minute")
     sql = f"""
-        SELECT bucket, concurrency FROM (
+        SELECT bucket, max(concurrency) AS concurrency FROM (
             SELECT
-                bucket,
-                sum(step_delta) OVER (ORDER BY bucket) AS concurrency
+                {bucket} AS bucket,
+                minute,
+                sum(step_delta) OVER (ORDER BY minute) AS concurrency
             FROM (
-                SELECT {bucket} AS bucket, sum(delta_sessions) AS step_delta
-                FROM cc_delta_content
+                SELECT minute, sum(delta_sessions) AS step_delta
+                FROM fact_concurrency_deltas FINAL
                 {dim_where}
-                GROUP BY bucket
+                GROUP BY minute
+                ORDER BY minute WITH FILL
+                    FROM {{start:DateTime}}
+                    TO {{end:DateTime}}
+                    STEP INTERVAL 1 MINUTE
             )
         )
-        WHERE bucket >= {{start:DateTime}} AND bucket < {{end:DateTime}}
+        WHERE minute >= {{start:DateTime}} AND minute < {{end:DateTime}}
+        GROUP BY bucket
         ORDER BY bucket
     """
     return ch_client.query(sql, params)
@@ -99,7 +149,7 @@ def get_trend(dims: dict, end: str, lookback_minutes: int = 10) -> dict:
                 SELECT minute, sum(step_delta) OVER (ORDER BY minute) AS cc
                 FROM (
                     SELECT minute, sum(delta_sessions) AS step_delta
-                    FROM cc_delta_content
+                    FROM fact_concurrency_deltas FINAL
                     {dim_where}
                     GROUP BY minute
                 )

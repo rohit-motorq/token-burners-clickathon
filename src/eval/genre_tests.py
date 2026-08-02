@@ -15,7 +15,7 @@ from ..agent.agent import answer
 from ..agent.router import classify
 from ..agent.observability import get_client, enabled as _langfuse_enabled
 
-# Fixtures verified against real rows in rohitdevtesting's cc_delta_content
+# Fixtures verified against real rows in rohitdevtesting's fact_concurrency_deltas
 # (checked live, see INNER_CONTEXT.md). Earlier versions used "Android" and
 # "sports" — neither exists as a literal value in this dataset (real
 # platform values are ANDROID_PHONE/IPHONE/SONY_ANDROID_TV/...; category
@@ -49,7 +49,7 @@ CASES = [
     },
     {
         "name": "diagnostic_content_drop",
-        # 2078157818 has 306 rows in cc_delta_content (checked live) — real
+        # 2078157818 has 306 rows in fact_concurrency_deltas (checked live) — real
         # activity, unlike the earlier 20971542 (0 rows, valid data but never
         # exercised the actual reasoning chain).
         "question": "Why did concurrency drop 40% on content 2078157818 in the last 10 minutes?",

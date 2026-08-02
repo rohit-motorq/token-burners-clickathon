@@ -1,0 +1,7 @@
+{
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://token-burners-backend.vercel.app/api/:path*" },
+    { "source": "/v1/:path*", "destination": "https://token-burners-backend.vercel.app/v1/:path*" },
+    { "source": "/charts/:path*", "destination": "https://token-burners-backend.vercel.app/charts/:path*" }
+  ]
+}
