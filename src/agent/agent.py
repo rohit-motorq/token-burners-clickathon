@@ -9,7 +9,7 @@ from . import config, ch_client, chart_store
 from .router import classify
 from .prompts import system_prompt_for
 from .observability import observe, get_client, propagate_attributes, enabled as _langfuse_enabled
-from .tools import concurrency, content, health, billing, chart
+from .tools import concurrency, content, health, billing, chart, capacity
 
 MAX_TURNS = 5
 _client = Anthropic(api_key=config.ANTHROPIC_API_KEY or None)
@@ -158,6 +158,30 @@ TOOL_SCHEMAS = {
             "required": ["advertiser_id", "start", "end"],
         },
     },
+    "get_active_users": {
+        "description": "Distinct users still active at a specific minute, for a content_id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content_id": {"type": "integer"},
+                "at_minute": {"type": "string", "description": "ISO datetime"},
+            },
+            "required": ["content_id", "at_minute"],
+        },
+    },
+    "predict_load": {
+        "description": "Projects concurrency forward from the recent trend and recommends scale_up/hold/scale_down.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **_DIM_PARAMS,
+                "end": {"type": "string"},
+                "horizon_minutes": {"type": "integer", "default": 10},
+                "lookback_minutes": {"type": "integer", "default": 10},
+            },
+            "required": ["end"],
+        },
+    },
     "render_chart": {
         # No "series" param — deliberately. Requiring the model to copy the
         # full data array as a literal tool-call argument means regenerating
@@ -181,11 +205,12 @@ TOOL_SCHEMAS = {
 }
 
 GENRE_TOOLS = {
-    "LOOKUP": ["get_concurrency_curve", "get_peak", "render_chart"],
+    "LOOKUP": ["get_concurrency_curve", "get_peak", "get_active_users", "render_chart"],
     "TREND": ["get_trend", "render_chart"],
     "BILLING": ["get_billable_impressions"],
     "DIAGNOSTIC": ["get_concurrency_curve", "get_content_metadata", "get_health_signals",
                    "render_chart"],
+    "CAPACITY": ["get_trend", "predict_load", "render_chart"],
 }
 
 
@@ -218,6 +243,12 @@ def _dispatch(name: str, kwargs: dict, chart_context: dict | None = None):
         return health.get_health_signals(kwargs["content_id"], kwargs["start"], kwargs["end"])
     if name == "get_billable_impressions":
         return billing.get_billable_impressions(kwargs["advertiser_id"], kwargs["start"], kwargs["end"])
+    if name == "get_active_users":
+        return concurrency.get_active_users(kwargs["content_id"], kwargs["at_minute"])
+    if name == "predict_load":
+        result = capacity.predict_load(_dims_from(kwargs), kwargs["end"], kwargs.get("horizon_minutes", 10),
+                                        kwargs.get("lookback_minutes", 10))
+        return result
     if name == "render_chart":
         series = (chart_context or {}).get("series")
         if not series:

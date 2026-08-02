@@ -12,7 +12,7 @@ Run: python -m src.mcp_server.server
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from src.agent.tools import billing, chart, concurrency, content, health
+from src.agent.tools import billing, capacity, chart, concurrency, content, health
 
 # default port is 8000, which collides with src/agent/server.py's FastAPI —
 # 8811 matches src/librechat/librechat.yaml's mcpServers.sonyliv-concurrency.url.
@@ -66,6 +66,24 @@ def get_trend(platform: str = None, country: str = None, video_resolution: str =
                                "video_resolution": video_resolution, "video_type": video_type,
                                "category": category, "content_id": content_id}.items() if v is not None}
     return concurrency.get_trend(dims, end, lookback_minutes)
+
+
+@mcp.tool()
+def get_active_users(content_id: int, at_minute: str) -> dict:
+    """Distinct users still active at a specific minute, for a content_id."""
+    return concurrency.get_active_users(content_id, at_minute)
+
+
+@mcp.tool()
+def predict_load(platform: str = None, country: str = None, video_resolution: str = None,
+                  video_type: str = None, category: str = None, content_id: int = None,
+                  end: str = None, horizon_minutes: int = 10, lookback_minutes: int = 10) -> dict:
+    """Projects concurrency forward from the recent trend and recommends
+    scale_up/hold/scale_down. Directional projection, not a capacity model."""
+    dims = {k: v for k, v in {"platform": platform, "country": country,
+                               "video_resolution": video_resolution, "video_type": video_type,
+                               "category": category, "content_id": content_id}.items() if v is not None}
+    return capacity.predict_load(dims, end, horizon_minutes, lookback_minutes)
 
 
 @mcp.tool()

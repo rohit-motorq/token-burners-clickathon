@@ -63,6 +63,16 @@ PROMPTS = {
         "so a non-technical reader understands not to use this number for "
         "real billing."
     ),
+    "CAPACITY": _COMMON + (
+        "\nThis is a resource-planning question, someone wants to know whether "
+        "to scale infrastructure up or down. Call predict_load internally, "
+        "which projects the near-future concurrency from the recent trend and "
+        "returns a recommended action. Always relay its disclaimer that this "
+        "is a directional projection off the recent trend, not a guaranteed "
+        "forecast. State plainly whether load looks like it is headed up, "
+        "down, or steady, and what that means for whether more capacity is "
+        "worth adding right now."
+    ),
     "DIAGNOSTIC": _COMMON + (
         "\nThis is a diagnostic question, someone wants to know why viewership "
         "changed. Investigate in this order internally, and stop as soon as "

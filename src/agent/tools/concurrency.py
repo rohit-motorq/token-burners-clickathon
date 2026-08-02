@@ -127,6 +127,35 @@ def get_peak(dims: dict, start: str, end: str, grain: str = "minute") -> dict:
 
 
 @observe(as_type="tool")
+def get_active_users(content_id: int, at_minute: str) -> dict:
+    """Distinct users still active at `at_minute` for a content_id: the
+    session's open/close events (delta_sessions +1/-1) net to > 0 as of
+    that minute. Same no-time-filter-inside-the-cumulative-sum rule as
+    get_peak/get_concurrency_curve — this reads full history up to
+    at_minute, not just a window, or open sessions started earlier get
+    silently excluded.
+
+    ponytail: approximates "active at minute X" via video_session_id's net
+    delta_sessions up to that minute, not a true point-in-time snapshot
+    join — good enough for "who was around at the peak", revisit if a
+    session-range table ever exists."""
+    sql = """
+        SELECT uniqExact(user_id) AS active_users, count() AS active_sessions
+        FROM (
+            SELECT video_session_id, argMax(user_id, minute) AS user_id,
+                   sum(delta_sessions) AS net
+            FROM fact_concurrency_deltas FINAL
+            WHERE content_id = {content_id:UInt64} AND minute <= {at_minute:DateTime}
+            GROUP BY video_session_id
+            HAVING net > 0
+        )
+    """
+    rows = ch_client.query(sql, {"content_id": content_id, "at_minute": at_minute})
+    row = rows[0] if rows else {"active_users": 0, "active_sessions": 0}
+    return {"content_id": content_id, "at_minute": at_minute, **row}
+
+
+@observe(as_type="tool")
 def get_trend(dims: dict, end: str, lookback_minutes: int = 10) -> dict:
     """Rate of change over the last N minute-buckets. Delta/slope computed in
     SQL, not left for the LLM to eyeball from a list of numbers."""
