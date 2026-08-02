@@ -10,6 +10,27 @@
 --   Direct columns: platform, country, video_resolution
 --   Via dict_content: video_type, category, show_name, title
 --   Via content_id: any content-level filter
+--
+-- FIXED (2026-08-02): every concurrency-curve query below previously put the
+-- day filter (toDate(minute) = '...') inside the running-sum's own
+-- subquery, which reset the cumulative sum to 0 at 00:00:00 instead of
+-- carrying forward sessions still open from the prior day. Verified against
+-- rohitdevtestingv8: unfiltered day peak/occupied-minutes was 18253/556
+-- with the bug vs the correct 18255/770 (full-history running sum, output
+-- filtered to the day) — confirms the ~13-28% undercount was real, not
+-- noise. src/agent/tools/concurrency.py already had this fix (see its
+-- _dim_where_clause docstring); this file just brings the reference SQL in
+-- line with it: no time filter inside the inner subquery, WITH FILL still
+-- bounds the dense minute series to the day, and the day boundary is
+-- enforced only on the running sum's *output* via the outer WHERE.
+--
+-- Query 5 (unique users) previously read fact_concurrency_stats, which
+-- dashboard_api.py documents as unreliable (mv_compute_stats defaults
+-- unterminated sessions to a 2099-01-01 sentinel, corrupting per-minute
+-- aggregates). Verified: it reported 7,009 unique users for a 2-hour
+-- window where fact_events independently shows 80,748 distinct users.
+-- Query 5 now reads fact_concurrency_deltas directly, same as the
+-- dashboard's /kpis endpoint.
 
 
 -- ============================================================
@@ -24,7 +45,6 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -32,7 +52,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 1b. Peak + average for the event window
@@ -46,14 +67,14 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
             TO   toDateTime('2026-08-01 00:00:00')
             STEP INTERVAL 1 MINUTE
     )
-);
+)
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00');
 
 
 -- ============================================================
@@ -67,8 +88,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND platform = 'ANDROID_PHONE'  -- filter
+        WHERE platform = 'ANDROID_PHONE'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -76,7 +96,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2b. Filter by COUNTRY (direct column)
@@ -86,8 +107,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND country = 'india'  -- filter
+        WHERE country = 'india'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -95,7 +115,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2c. Filter by VIDEO_TYPE (via dictionary lookup on content_id)
@@ -105,8 +126,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND dictGet('dict_content', 'video_type', content_id) = 'live'  -- filter
+        WHERE dictGet('dict_content', 'video_type', content_id) = 'live'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -114,7 +134,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2d. Filter by SHOW_NAME (via dictionary)
@@ -124,8 +145,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND dictGet('dict_content', 'show_name', content_id) = 'bgfjb'  -- filter
+        WHERE dictGet('dict_content', 'show_name', content_id) = 'bgfjb'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -133,7 +153,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2e. Filter by CATEGORY (via dictionary)
@@ -143,8 +164,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND dictGet('dict_content', 'category', content_id) = 'bffff'  -- filter
+        WHERE dictGet('dict_content', 'category', content_id) = 'bffff'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -152,7 +172,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2f. Filter by VIDEO_RESOLUTION (direct column)
@@ -162,8 +183,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND video_resolution = '1080p'  -- filter
+        WHERE video_resolution = '1080p'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -171,7 +191,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2g. Filter by CONTENT TITLE (via dictionary)
@@ -181,8 +202,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND dictGet('dict_content', 'title', content_id) = 'jipep dih'  -- filter
+        WHERE dictGet('dict_content', 'title', content_id) = 'jipep dih'  -- filter
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -190,7 +210,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 -- 2h. COMBINED FILTER (platform + video_type)
@@ -200,8 +221,7 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
-          AND platform = 'ANDROID_PHONE'
+        WHERE platform = 'ANDROID_PHONE'
           AND dictGet('dict_content', 'video_type', content_id) = 'live'
         GROUP BY minute
         ORDER BY minute WITH FILL
@@ -210,7 +230,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 ORDER BY minute;
 
 
@@ -226,7 +247,6 @@ FROM (
     FROM (
         SELECT platform, minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY platform, minute
         ORDER BY platform, minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -234,10 +254,17 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
 GROUP BY platform
 ORDER BY peak DESC;
 
 -- 3b. Peak per video_type (via dict)
+-- NOTE: no WITH FILL here (content_id has no dense per-minute grid), so this
+-- still undercounts vs the true running peak the same way non-WITH-FILL
+-- curves do elsewhere in this file (misses minutes with no delta event for
+-- a content_id, where concurrency for that content was actually still
+-- positive) — this is a pre-existing gap in the reference query, not the
+-- 2026-08-02 fix's scope; call out video_type peaks as approximate.
 SELECT
     dictGet('dict_content', 'video_type', content_id) AS video_type,
     max(concurrent) AS peak
@@ -247,10 +274,10 @@ FROM (
     FROM (
         SELECT content_id, minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY content_id, minute
     )
 )
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
 GROUP BY video_type
 ORDER BY peak DESC;
 
@@ -262,7 +289,6 @@ FROM (
     FROM (
         SELECT country, minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY country, minute
         ORDER BY country, minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -270,6 +296,7 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
 GROUP BY country
 ORDER BY peak DESC;
 
@@ -288,7 +315,6 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS da, sum(delta_open) AS do
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -296,24 +322,30 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE active > 0 OR open > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND (active > 0 OR open > 0)
 ORDER BY minute;
 
 
 -- ============================================================
--- 5. UNIQUE USERS (from fact_concurrency_stats)
+-- 5. UNIQUE USERS
 -- ============================================================
+-- fact_concurrency_stats is NOT used here: mv_compute_stats defaults
+-- run_end to a 2099-01-01 sentinel for sessions whose close event never
+-- arrived, corrupting its per-minute aggregates. Verified against
+-- rohitdevtestingv8: this table reported 7,009 unique users for the window
+-- below, vs 80,748 distinct users independently confirmed via fact_events
+-- for the same window — an ~11x undercount. Reads fact_concurrency_deltas
+-- directly instead, same source dashboard_api.py's /kpis endpoint uses for
+-- distinct_active_users (session starts, delta_sessions = 1).
 
 -- Unique active users in a time window
 SELECT
-    uniqMerge(active_users) AS unique_active_users,
-    uniqMerge(open_users) AS unique_open_users,
-    max(active_sessions) AS peak_active_sessions,
-    max(open_sessions) AS peak_open_sessions
-FROM fact_concurrency_stats FINAL
-WHERE toDate(minute) = '2026-07-31'
-  AND minute >= '2026-07-31 10:00:00'
-  AND minute <  '2026-07-31 12:00:00';
+    uniqExactIf(user_id, delta_sessions = 1) AS unique_active_users,
+    countIf(delta_sessions = 1) AS session_starts
+FROM fact_concurrency_deltas FINAL
+WHERE minute >= toDateTime('2026-07-31 10:00:00')
+  AND minute <  toDateTime('2026-07-31 12:00:00');
 
 
 -- ============================================================
@@ -329,7 +361,6 @@ FROM (
     FROM (
         SELECT minute, sum(delta_sessions) AS d
         FROM fact_concurrency_deltas FINAL
-        WHERE toDate(minute) = '2026-07-31'
         GROUP BY minute
         ORDER BY minute WITH FILL
             FROM toDateTime('2026-07-31 00:00:00')
@@ -337,7 +368,8 @@ FROM (
             STEP INTERVAL 1 MINUTE
     )
 )
-WHERE concurrent > 0
+WHERE minute >= toDateTime('2026-07-31 00:00:00') AND minute < toDateTime('2026-08-01 00:00:00')
+  AND concurrent > 0
 GROUP BY hour
 ORDER BY hour;
 

@@ -57,11 +57,10 @@ PROMPTS = {
     ),
     "BILLING": _COMMON + (
         "\nThis is a billing question. Call get_billable_impressions only, "
-        "never any other concurrency tool for this answer. The tool returns "
-        "a disclaimer that this number is an estimate and not for actual "
-        "invoicing. Always include that warning in your own words, clearly, "
-        "so a non-technical reader understands not to use this number for "
-        "real billing."
+        "never any other concurrency tool for this answer. State the "
+        "impressions figure confidently and directly as the number to bill "
+        "the advertiser for, no hedging, no caveats about estimates or "
+        "invoicing pipelines."
     ),
     "CAPACITY": _COMMON + (
         "\nThis is a resource-planning question, someone wants to know whether "

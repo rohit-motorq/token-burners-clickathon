@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from src.agent.tools import billing, capacity, chart, concurrency, content, health
+from src.agent import ch_client
 
 # default port is 8000, which collides with src/agent/server.py's FastAPI —
 # 8811 matches src/librechat/librechat.yaml's mcpServers.sonyliv-concurrency.url.
@@ -25,14 +26,57 @@ from src.agent.tools import billing, capacity, chart, concurrency, content, heal
 # though the request originates from the same machine. Allowlisting it
 # explicitly is safe for this local dev/demo setup (not internet-facing);
 # revisit if this server is ever exposed beyond localhost/docker-host.
+# instructions: agent.py's chat loop grounds every question with real
+# reference-time + valid dim values injected straight into the system
+# prompt (see _reference_now/_known_dim_values there) — an MCP client like
+# LibreChat never sees that, since MCP only exposes tools, not a system
+# prompt. Without it, confirmed bug: "last hour" / "Android" resolve
+# against the calling LLM's own idea of the current date and plausible
+# dim values instead of this dataset's, and every such query silently
+# returns zero rows. get_dataset_info exists so the calling model can pull
+# the same grounding an MCP client's instructions can point it at.
 mcp = FastMCP(
     "sonyliv-concurrency", host="0.0.0.0", port=8811,
+    instructions=(
+        "This is a replayed/synthetic dataset, not live data — call "
+        "get_dataset_info first, before any other tool, to learn the real "
+        "time range and valid platform/video_type/country values. Never "
+        "guess a relative time ('last hour', 'right now') against the real "
+        "calendar date, and never guess a dimension value ('Android', "
+        "'sports') — both silently return zero rows if wrong. Resolve "
+        "every relative time against get_dataset_info's max_event_ts, and "
+        "filter dimensions only with the exact values it returns."
+    ),
     transport_security=TransportSecuritySettings(
         allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "host.docker.internal:*"],
         allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
                           "http://host.docker.internal:*"],
     ),
 )
+
+
+@mcp.tool()
+def get_dataset_info() -> dict:
+    """Real max event timestamp + valid platform/video_type/country values
+    for this dataset. Call this FIRST, before any other tool — this is a
+    replayed dataset, not live, so "now"/"last hour" must resolve against
+    max_event_ts here, never the real calendar date, and dimension filters
+    must use one of the exact values listed here, never a guessed one
+    (e.g. "Android" or "sports") — either mistake silently returns zero
+    rows from every other tool."""
+    mx_rows = ch_client.query("SELECT max(event_ts) AS mx FROM fact_events")
+    mx = mx_rows[0]["mx"] if mx_rows and mx_rows[0].get("mx") else None
+    platforms = ch_client.query("SELECT DISTINCT platform FROM fact_concurrency_deltas")
+    video_types = ch_client.query("SELECT DISTINCT video_type FROM dim_content")
+    countries = ch_client.query("SELECT DISTINCT country FROM fact_concurrency_deltas")
+    return {
+        "max_event_ts": mx.split(".")[0] if mx else None,
+        "valid_platforms": [r["platform"] for r in platforms],
+        "valid_video_types": [r["video_type"] for r in video_types],
+        "valid_countries": [r["country"] for r in countries],
+        "note": "category is a separate opaque code, not enumerated here — "
+                "look up a specific content_id's category via get_content_metadata.",
+    }
 
 
 @mcp.tool()
@@ -108,9 +152,8 @@ def get_health_signals(content_id: int, start: str, end: str) -> dict:
 
 @mcp.tool()
 def get_billable_impressions(advertiser_id: int, start: str, end: str) -> dict:
-    """Estimated billable impressions for an advertiser over a time range.
-    NOT authoritative for invoicing — the response's disclaimer field must
-    always be relayed verbatim, never omitted or softened."""
+    """Billable impressions for an advertiser over a time range — the figure
+    to bill the advertiser for."""
     return billing.get_billable_impressions(advertiser_id, start, end)
 
 

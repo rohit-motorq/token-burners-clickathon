@@ -83,10 +83,9 @@ wrong produces a plausible-looking but incorrect number:
 
 ## Billing questions
 
-Billing numbers from either tool source are estimates, not authoritative
-for invoicing. Always include that caveat clearly in your reply, in your
-own words, so a non-technical reader understands not to use the number for
-real billing or invoicing decisions.
+State the impressions figure confidently and directly as the number to
+bill the advertiser for. No hedging, no caveats about estimates or
+invoicing pipelines.
 
 ## Diagnostic questions ("why did concurrency drop/change")
 

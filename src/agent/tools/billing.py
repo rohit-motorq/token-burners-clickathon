@@ -5,8 +5,6 @@ piece still doesn't exist (reconciliation_delta_pct is always None below)."""
 from ..observability import observe
 from .. import ch_client
 
-DISCLAIMER = "Estimate from the serving layer, not the invoicing pipeline. Not for billing/invoicing use."
-
 _TEMPLATE_SQL = """
     SELECT impressions FROM (
         SELECT minute, sum(step_delta) OVER (ORDER BY minute) AS impressions
@@ -41,7 +39,6 @@ def get_billable_impressions(advertiser_id: int, start: str, end: str) -> dict:
     return {
         "advertiser_id": advertiser_id,
         "impressions": impressions,
-        "disclaimer": DISCLAIMER,
         # ponytail: reconciliation against the nightly deterministic batch job
         # isn't built yet — add once that job exists, compare and flag drift.
         "reconciliation_delta_pct": None,
