@@ -6,10 +6,20 @@
 # 1. `endpoints.custom` — primary path. Routes chat straight to src/agent/server.py's
 #    OpenAI-compatible /v1/chat/completions, which runs router -> genre-scoped
 #    tools -> Langfuse trace internally. This is the one with tracing/eval.
-# 2. `mcpServers` — secondary/bonus path. LibreChat's own model calls the typed
-#    tools directly over MCP (src/mcp_server/server.py). No Langfuse wrapping on
-#    this path since it bypasses agent.py's loop — useful as a "this is also a
-#    standard MCP tool server" demo, not the primary integration.
+#    Unaffected by the ClickHouse MCP addition below — this path never touches
+#    MCP or raw SQL at all, guardrail untouched.
+# 2. `mcpServers` — secondary/bonus path. LibreChat's own model calls tools
+#    directly over MCP, with TWO servers registered, in priority order:
+#    a) sonyliv-concurrency (src/mcp_server/server.py) — our typed, no-SQL
+#       tools. Try these first for anything they cover.
+#    b) clickhouse (official mcp-clickhouse, read-only) — a fallback for
+#       analysis our tools don't cover. Raw SQL, but read-only enforced at
+#       the ClickHouse-connection level (CLICKHOUSE_ALLOW_WRITE_ACCESS=false,
+#       mcp-clickhouse's own default). Priority is communicated to the model
+#       via each server's serverInstructions below — LibreChat injects these
+#       into context (confirmed: packages/api/src/mcp/MCPManager.ts formats
+#       them as "## <server> MCP Server Instructions" blocks for the model).
+#       No Langfuse wrapping on this path since it bypasses agent.py's loop.
 
 version: 1.2.1
 
@@ -42,5 +52,72 @@ endpoints:
 mcpServers:
   sonyliv-concurrency:
     type: sse
-    # src/mcp_server/server.py — run with: python -m src.mcp_server.server
+    # src/mcp_server/server.py — run with: scripts/start_mcp_server.sh
     url: "http://host.docker.internal:8811/sse"
+    serverInstructions: >
+      Always try this server's tools first for anything about SonyLIV
+      concurrency, viewership, billing estimates, or content diagnostics.
+      These are typed, safe, and already know the correct schema and real
+      dimension values. If part of a question needs something these tools
+      do not provide (distinct/unique user or viewer counts, breakdowns by
+      audio or subtitle language, per-event-type counts, anything requiring
+      a custom SQL aggregation), do NOT tell the user that number is
+      unavailable or that it would need a different team or report. Use the
+      clickhouse server's run_query tool yourself to compute it, using the
+      exact time window and filters already established from this server's
+      tool calls in the same answer, then report the real number.
+  clickhouse:
+    type: sse
+    # Official mcp-clickhouse, read-only — scripts/start_clickhouse_mcp.sh
+    url: "http://host.docker.internal:8812/sse"
+    serverInstructions: >
+      Fallback, but a MANDATORY one, not optional. If any part of a
+      question needs something the sonyliv-concurrency server's tools do
+      not provide, actively use run_query here yourself to compute it —
+      never respond that a number is unavailable, needs a different team,
+      or needs a different kind of report. Concrete example that MUST use
+      this path: "how many distinct users were watching during this peak
+      minute" — sonyliv-concurrency has no tool for that, so query
+      count(DISTINCT user_id) FROM events_raw for that exact time window
+      and filters yourself, and report the real number, in the same answer.
+
+      Only boundary: never use this to re-derive something the
+      sonyliv-concurrency tools already compute correctly (concurrency
+      curves, peaks, trends, billing estimates) — those tools account for
+      foreground-only activity and known schema quirks that a raw query
+      will get wrong. This connection is read-only; write queries will be
+      rejected by ClickHouse itself.
+
+      Database: rohitdevtesting. list_tables gives you column names and
+      types, not what a table actually means — read this first, since
+      getting these wrong produces a plausible-looking but incorrect number:
+
+      - events_raw: one row per raw playback event, including paused,
+        backgrounded, and error events. This is NOT foreground-only
+        viewership — counting rows here overcounts against what the
+        sonyliv-concurrency tools report, which deliberately exclude
+        those states. Use this table only for genuine event-level
+        exploration (event type distributions, error rates), never as a
+        substitute for a concurrency count.
+      - cc_delta_content: minute-level +1/-1 session deltas, not a
+        snapshot. To get concurrency at any point, take a running sum of
+        delta_sessions ordered by minute, then read the value at the
+        point you want. Never count or sum rows directly as "current
+        viewers" — a raw sum(delta_sessions) with no running/cumulative
+        window just gives you the net change, not the concurrency level.
+      - session_active: current per-session state (is_active, last_seen),
+        ReplacingMergeTree — a naive SELECT sees stale duplicate versions.
+        Use argMax(column, version) grouped by video_session_id to get
+        the current value.
+      - content_dim: title/video_type/category, plus scheduled_end_ts and
+        end_ts_is_estimated. scheduled_end_ts is ALWAYS an inference from
+        past session data, never a real programming schedule — say so if
+        you use it, never state it as a confirmed fact.
+      - ad_content_map: advertiser_id to content_id mapping, used for
+        billing estimates.
+      - category values across all tables are opaque internal codes
+        (e.g. "cdbgg"), not genre names — query SELECT DISTINCT yourself
+        rather than guessing a human-readable value.
+      - This is a replayed, frozen synthetic dataset, not a live feed —
+        check max(event_ts) yourself before treating "now" as the real
+        calendar date.

@@ -333,6 +333,85 @@ of font glyph coverage.
 
 ---
 
+## Why the plain-language rule and the name-the-platform rule are separate, not one rule
+
+**Decision:** `prompts.py`'s house rules 2 (no technical field/tool names)
+and 4 (always name the platform/content/filter in plain words) are written
+as two distinct numbered rules, not folded into one "be plain and clear"
+instruction.
+
+**Why:** asked "peak concurrency on Jio Android TV" over a real 48-hour
+window, the model correctly filtered by platform internally (the number was
+right) but wrote a generic answer about "viewership" and "the data" that
+never once said Jio, Android, or TV anywhere, reading as if it covered
+every platform combined. Rule 2 (introduced earlier, to stop the model
+saying `scheduled_end_ts`/`delta_pct` in replies) apparently over-generalized
+into also stripping out legitimate plain-language context the user actually
+needs, since dropping technical terms and dropping filter context both look
+like "removing jargon" from the model's perspective without a rule telling
+it these are different things. Rule 4 explicitly separates them: never name
+the column, but always name what it filtered on, in plain words, near the
+start of the answer, every time.
+
+---
+
+## Why ClickHouse's official MCP server is a priority-ranked fallback, only on the LibreChat-native MCP path
+
+**Decision:** the official `mcp-clickhouse` server runs alongside our own
+`sonyliv-concurrency` MCP server, both registered in `librechat.yaml`'s
+`mcpServers`, with `serverInstructions` telling the model to try our tools
+first and only fall back to raw SQL for analysis our tools genuinely don't
+cover. `agent.py`'s own tool-calling loop (the primary, Langfuse-traced
+path) is untouched — it still never sees SQL, by explicit choice (asked and
+confirmed rather than assumed, since this reverses a guardrail documented
+elsewhere in this file).
+
+**Why scoped to the LibreChat-native path only:** giving our own agent.py
+loop raw SQL access would mean building an actual MCP *client* inside it
+(a real engineering lift — it currently only calls Python functions
+directly) and would reverse the no-SQL guardrail on the path that's
+supposed to be the safe, traced, curated one. The LibreChat-native MCP path
+was already documented as "secondary/bonus, no Langfuse wrapping" — adding
+a read-only fallback there doesn't change that path's risk profile, it was
+never the guarded one.
+
+**How priority is actually communicated to the model — not just written in
+a comment:** found by reading LibreChat's own source
+(`packages/api/src/mcp/MCPManager.ts`): each MCP server's `serverInstructions`
+field in `librechat.yaml` gets injected into the model's context as a
+`## <server name> MCP Server Instructions` block. This is a real,
+LibreChat-supported mechanism, not a hopeful comment — confirmed via
+`docker logs LibreChat`, which shows `Server Instructions: configured (325
+chars)` / `(561 chars)` for each server after connecting.
+
+**Read-only enforcement, and where it actually lives:** `mcp-clickhouse`
+defaults to `CLICKHOUSE_ALLOW_WRITE_ACCESS=false` — deliberately left at
+that default in `clickhouse_mcp.env(.example)` rather than touched, so the
+real safety boundary is ClickHouse's own connection-level enforcement, not
+just a prompt asking the model nicely not to write. The prompt instruction
+governs *when* to reach for this tool at all; the connection config governs
+what it's *capable* of even if asked.
+
+**Auth note:** SSE/HTTP transport requires `mcp-clickhouse` to have some
+auth configured or it refuses to start at all (a real error hit while
+setting this up: `ValueError: Authentication is required for HTTP/SSE
+transports`). Set `CLICKHOUSE_MCP_AUTH_DISABLED=true` — appropriate here
+since this server binds to the same local/docker-host trust boundary as our
+own MCP server (also unauthenticated), not internet-facing.
+
+**Why the clickhouse server's `serverInstructions` also explains what each
+table means, not just when to use it:** `list_tables`/`run_query` give
+column names and types, not semantics. Without being told, a fallback query
+would very plausibly `COUNT(*)` on `cc_delta_content` (a delta table —
+needs a running sum, not a row count) or read `session_active` with a plain
+`SELECT` (a `ReplacingMergeTree` — sees stale duplicate versions without
+`argMax(col, version)`), producing a wrong-but-confident number instead of
+an honest failure. Added a compact per-table gotcha list to the same
+`serverInstructions` string already used for priority — same mechanism,
+just enriched, not a new one.
+
+---
+
 ## Why `mcp` is pinned `<2.0` in `src/mcp_server/requirements.txt`
 
 **Decision:** pinned, not left open-ended.

@@ -2,6 +2,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+src/mcp_server/clickhouse_mcp.env
+!src/mcp_server/clickhouse_mcp.env.example
 src/eval/eval_report.json
 .venv/
 logs/

@@ -15,3 +15,4 @@ stop_one() {
 
 stop_one mcp_server logs/mcp_server.pid
 stop_one agent_server logs/agent_server.pid
+stop_one clickhouse_mcp logs/clickhouse_mcp.pid

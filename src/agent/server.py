@@ -8,11 +8,42 @@ from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .agent import answer
+from .agent import answer, _reference_now
 from . import chart_store
+from .tools import concurrency, dashboard
 from .observability import get_client, enabled as _langfuse_enabled
 
 app = FastAPI()
+
+
+def _sample_dashboard_reply() -> str:
+    """LLM-free path (question == "TEST_DASHBOARD") — builds render_dashboard's
+    real HTML from real ClickHouse data, no Anthropic credits needed. Useful
+    for verifying the artifact pipeline end to end while credits are out."""
+    from datetime import datetime, timedelta
+    ref_now = _reference_now() or "2026-07-26 11:30:00"
+    end_dt = datetime.strptime(ref_now, "%Y-%m-%d %H:%M:%S")
+    start_dt = end_dt - timedelta(hours=1)
+    curve = concurrency.get_concurrency_curve({"platform": "ANDROID_PHONE"},
+                                               start_dt.strftime("%Y-%m-%d %H:%M:%S"), ref_now, "minute")
+    peak = concurrency.get_peak({"platform": "ANDROID_PHONE"},
+                                 start_dt.strftime("%Y-%m-%d %H:%M:%S"), ref_now, "minute")
+    avg = sum(r["concurrency"] for r in curve) / len(curve) if curve else 0
+    rising = curve[-1]["concurrency"] >= curve[0]["concurrency"] if len(curve) >= 2 else True
+    entries = [
+        {"kind": "stat", "label": "Peak concurrency", "value": f"{peak['peak_value']:,}",
+         "sub": f"at {peak['peak_bucket']}"},
+        {"kind": "stat", "label": "Average concurrency", "value": f"{avg:,.0f}",
+         "sub": "over the last hour"},
+        {"kind": "stat", "label": "Current trend", "value": "Rising" if rising else "Falling",
+         "accent": "#1dd1a1" if rising else "#ff6b6b"},
+        {"kind": "stat", "label": "Platform", "value": "Android phones", "accent": "#c8d6e5"},
+        {"kind": "chart", "series": curve, "x_key": "bucket", "y_key": "concurrency",
+         "chart_title": "ANDROID_PHONE concurrency, last hour"},
+    ]
+    return "Here is a sample dashboard, built from live data with no LLM call.\n\n" + \
+        dashboard.render_dashboard_html("Sample Dashboard", entries,
+                                         subtitle=f"ANDROID_PHONE · last hour · as of {ref_now}")
 
 
 class Message(BaseModel):
@@ -50,12 +81,17 @@ def _sse_stream(reply: str, chunk_id: str, model: str):
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatRequest):
     question = req.messages[-1].content
-    reply = answer(question, user_id=req.user)
-    # short-lived request in a low-traffic hackathon demo — flush so the
-    # trace is visible in Langfuse immediately rather than waiting on the
-    # background batch interval.
-    if _langfuse_enabled:
-        get_client().flush()
+    if question.strip() == "TEST_DASHBOARD":
+        # LLM-free smoke test for the artifact pipeline — no Anthropic call,
+        # real ClickHouse data. See _sample_dashboard_reply above.
+        reply = _sample_dashboard_reply()
+    else:
+        reply = answer(question, user_id=req.user)
+        # short-lived request in a low-traffic hackathon demo — flush so the
+        # trace is visible in Langfuse immediately rather than waiting on the
+        # background batch interval.
+        if _langfuse_enabled:
+            get_client().flush()
 
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     if req.stream:

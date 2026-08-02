@@ -19,8 +19,17 @@ start_one() {
 start_one mcp_server logs/mcp_server.pid .venv/bin/python -m src.mcp_server.server
 start_one agent_server logs/agent_server.pid .venv/bin/python -m uvicorn src.agent.server:app --host 0.0.0.0 --port 8000
 
+if [ -f src/mcp_server/clickhouse_mcp.env ]; then
+    start_one clickhouse_mcp logs/clickhouse_mcp.pid ./scripts/start_clickhouse_mcp.sh
+else
+    echo "clickhouse_mcp skipped — src/mcp_server/clickhouse_mcp.env not found (optional; copy the .example and fill in CLICKHOUSE_PASSWORD to enable)."
+fi
+
 sleep 8
 echo
 echo "Checking health..."
 curl -s http://localhost:8000/health && echo " <- agent server" || echo "agent server not responding yet — check logs/agent_server.log"
 curl -s -o /dev/null -w "%{http_code}" http://localhost:8811/sse --max-time 2 && echo " <- mcp server (HEAD /sse)" || true
+if [ -f src/mcp_server/clickhouse_mcp.env ]; then
+    curl -s -o /dev/null -w "%{http_code}" http://localhost:8812/sse --max-time 2 && echo " <- clickhouse mcp server (HEAD /sse)" || true
+fi

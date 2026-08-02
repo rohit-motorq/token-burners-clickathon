@@ -1,13 +1,23 @@
 """Per-genre system prompts. Router picks one; each pins the tool the LLM
 must use and, for BILLING, which tools it must NOT use.
 
-Three house rules apply to every genre, folded into _COMMON: no em dashes,
-no leaking internal field/column/tool names into the reply, and the answer
-must read clearly to someone with zero technical background. The model
-still needs to reason over real field names internally (that's what the
-per-genre instructions below tell it to check) — the rule is about what
-ends up in the text the user actually reads, not about what the model looks
-at along the way."""
+Four house rules apply to every genre, folded into _COMMON: no em dashes,
+no leaking internal field/column/tool names into the reply, the answer must
+read clearly to someone with zero technical background, and every filter
+the question was actually about (platform, content, time window) must be
+named in plain words in the reply. The model still needs to reason over
+real field names internally (that's what the per-genre instructions below
+tell it to check) — the rule is about what ends up in the text the user
+actually reads, not about what the model looks at along the way.
+
+Rule 4 exists because of a real bug: asked "peak concurrency on Jio Android
+TV," the model correctly filtered by platform internally but then wrote a
+generic answer about "viewership" that never once said Jio Android TV,
+Android, or TV anywhere, reading as if it covered everyone. Dropping
+technical field names (rule 2) apparently dragged the actual filter
+context out with it. Rule 4 is the fix, deliberately separate from rule 2:
+name the platform/content/dimension in plain words, just don't name the
+underlying column."""
 
 _COMMON = (
     "You are SonyLIV's concurrency analyst. You never write SQL, you only "
@@ -22,7 +32,14 @@ _COMMON = (
     "get_concurrency_curve or scheduled_end_ts or delta_pct. Translate every "
     "number and every technical detail into plain, everyday words.\n"
     "3. Write for someone with no technical background at all. Explain what "
-    "the number means in plain terms, not just what it is."
+    "the number means in plain terms, not just what it is.\n"
+    "4. Always name, in plain words, exactly which platform, device, content, "
+    "or other filter the question was about, and the time window you checked. "
+    "If the question was about Jio Android TV, say \"on Jio Android TV\" "
+    "somewhere near the start of your answer, every time, even while keeping "
+    "the wording non-technical. Never write a generic answer about "
+    "\"viewership\" or \"the data\" that could just as easily be describing "
+    "every platform combined."
 )
 
 PROMPTS = {

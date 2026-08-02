@@ -16,8 +16,12 @@ expose the same tools: `src/agent/server.py` (an OpenAI-compatible HTTP
 endpoint, the primary path, with Langfuse tracing) and
 `src/mcp_server/server.py` (an MCP server, for LibreChat's native MCP tool
 support or any other MCP client). `src/librechat/librechat.yaml` wires both
-into LibreChat. ClickHouse schema lives in `src/migrationv2/migrations/`
-(the authoritative one — see `INNER_CONTEXT.md` for why).
+into LibreChat, plus a second MCP server — the official `mcp-clickhouse`,
+read-only, registered as a priority-ranked fallback for analysis our own
+tools don't cover (LibreChat's native MCP path only; the primary HTTP path
+never touches raw SQL — see `INNER_CONTEXT.md`). ClickHouse schema lives in
+`src/migrationv2/migrations/` (the authoritative one — see `INNER_CONTEXT.md`
+for why).
 
 ## Prerequisites
 
@@ -56,14 +60,20 @@ re-run.
 ```bash
 ./scripts/start_all.sh
 ```
-Starts both servers in the background:
+Starts these in the background:
 - Agent HTTP server on `:8000` (`logs/agent_server.log`)
 - MCP server on `:8811` (`logs/mcp_server.log`)
+- ClickHouse MCP server on `:8812` (`logs/clickhouse_mcp.log`) — **optional**,
+  only starts if `src/mcp_server/clickhouse_mcp.env` exists. To enable it:
+  ```bash
+  cp src/mcp_server/clickhouse_mcp.env.example src/mcp_server/clickhouse_mcp.env
+  # edit it, fill in CLICKHOUSE_PASSWORD
+  ```
 
 ```bash
 ./scripts/stop_all.sh
 ```
-Stops both.
+Stops all of the above.
 
 ## Testing without LibreChat
 
@@ -99,8 +109,11 @@ cd /path/to/your/LibreChat && docker compose up -d --force-recreate api
 
 Confirm it connected:
 ```bash
-docker logs LibreChat --tail 50 2>&1 | grep -iE "mcp|sonyliv"
-# look for: [MCP] Initialized with 1 configured server and 7 tools.
+docker logs LibreChat --tail 50 2>&1 | grep -iE "mcp|sonyliv|clickhouse"
+# with only the concurrency MCP server enabled:
+#   [MCP] Initialized with 1 configured server and 7 tools.
+# with clickhouse_mcp.env also configured (see start_all.sh above):
+#   [MCP] Initialized with 2 configured servers and 10 tools.
 ```
 
 In the LibreChat UI: start a new chat, open the **model/endpoint
@@ -126,10 +139,12 @@ reasoning for each is in [`INNER_CONTEXT.md`](src/agent/INNER_CONTEXT.md).
 | Chart never displays, even though the reply text is correct | react-markdown strips `data:` image URIs by default (security) | Charts are served over real HTTP (`/charts/{id}.png`, `chart_store.py`), not embedded as base64 |
 | LibreChat: `Domain "http://host.docker.internal:8811" is not allowed` | Two *separate* SSRF/DNS-rebinding guards — the MCP SDK's own `transport_security`, and LibreChat's own `mcpSettings.allowedDomains` | Both allowlist `host.docker.internal` (`mcp_server/server.py` + `librechat.yaml`) |
 | LibreChat: "No key found. Please provide a key" | `librechat.yaml`'s custom endpoint had `apiKey: "user_provided"` | Hardcoded to a placeholder string — our server never validates it anyway |
-| `ANDROID_PHONE`/`live`/specific content questions return "no data" | The model guessed plausible-but-wrong values (`"Android"`, `"sports"`) that don't exist in this dataset's actual enum values | Not a bug — ask about real values (see sample questions above), or check `SELECT DISTINCT platform/video_type/category FROM cc_delta_content` yourself |
+| Casual phrasing (`"Android"`, `"sports"`) silently returns no data | The model guessed a plausible-but-wrong literal value that doesn't exist in this dataset's actual enum values | `agent.py` queries real distinct platform/video_type/country values fresh every request and injects them into the system prompt, so the model maps casual phrasing to the real value instead of guessing |
 | Every relative-time question ("last hour", "yesterday") returns empty | The model has no real-world clock and this is a frozen, replayed dataset | `agent.py` injects `max(event_ts)` from the data itself as "now" in the system prompt |
+| Reply answers the number but never says which platform/content it's about | Telling the model to drop technical field names also dragged out the plain-language filter context (e.g. never says "on Jio Android TV") | A separate house rule in `prompts.py` requires naming the platform/content/filter in plain words, distinct from the no-jargon rule |
 | `ModuleNotFoundError: mcp.server.fastmcp` | `pip install mcp` defaults to v2.0, which renamed/moved that module | `requirements.txt` pins `mcp>=1.2,<2.0` |
 | Langfuse import errors (`langfuse.decorators` missing) | `pip install langfuse` defaults to v4 (OTel-based rewrite, different API) | Code is written against the real v4 API (`observability.py`); requirements pin `langfuse>=4.0,<5.0` |
+| `mcp-clickhouse`: `Authentication is required for HTTP/SSE transports` | SSE/HTTP transport refuses to start without some auth configured | `CLICKHOUSE_MCP_AUTH_DISABLED=true` in `clickhouse_mcp.env` — fine for this local/docker-host trust boundary, same as our own MCP server |
 
 ## Repo layout
 
