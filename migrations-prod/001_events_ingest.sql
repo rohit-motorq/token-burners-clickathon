@@ -1,11 +1,12 @@
 -- Migration 001: Raw ingestion endpoint (Null engine)
--- Matches Kafka/JSON format exactly. All strings, conversion happens downstream.
+-- Column order matches the unseen-day CSV header exactly.
+-- ClickPipes maps positionally, so order matters.
 
 CREATE TABLE IF NOT EXISTS raw_events_ingest
 (
+    content_id        String,
     video_session_id  String,
     user_id           String,
-    content_id        String,
     event_type        LowCardinality(String),
     event             LowCardinality(String),
     event_timestamp   String,

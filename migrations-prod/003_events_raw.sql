@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS fact_events
 (
     video_session_id  String,
     user_id           String,
-    content_id        UInt64,
+    content_id        Int64,
     event_type        LowCardinality(String) DEFAULT 'unknown',
     event             LowCardinality(String) DEFAULT 'unknown',
     event_ts          DateTime64(3, 'UTC'),
@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS fact_events
     player_version    LowCardinality(String) DEFAULT 'unknown',
     video_resolution  LowCardinality(String) DEFAULT 'unknown',
     session_start     DateTime64(3, 'UTC'),
-    title             String,
-    video_type        LowCardinality(String),
-    category          LowCardinality(String),
+    title             String DEFAULT 'unknown',
+    video_type        LowCardinality(String) DEFAULT 'unknown',
+    category          LowCardinality(String) DEFAULT 'unknown',
     show_name         String DEFAULT 'unknown',
     ingest_ts         DateTime64(3, 'UTC') DEFAULT now64(3)
 )
@@ -32,7 +32,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS mv_ingest_to_fact TO fact_events AS
 SELECT
     video_session_id,
     user_id,
-    toUInt64(content_id) AS content_id,
+    toInt64(content_id) AS content_id,
     event_type,
     event,
     fromUnixTimestamp64Milli(toInt64(event_timestamp)) AS event_ts,
@@ -44,9 +44,9 @@ SELECT
     player_version,
     video_resolution,
     fromUnixTimestamp64Milli(toInt64(session_start_epoch)) AS session_start,
-    dictGetOrDefault('dict_content', 'title', toUInt64(content_id), 'unknown') AS title,
-    dictGetOrDefault('dict_content', 'video_type', toUInt64(content_id), 'unknown') AS video_type,
-    dictGetOrDefault('dict_content', 'category', toUInt64(content_id), 'unknown') AS category,
-    dictGetOrDefault('dict_content', 'show_name', toUInt64(content_id), 'unknown') AS show_name,
+    dictGetOrDefault('dict_content', 'title', toInt64(content_id), 'unknown') AS title,
+    dictGetOrDefault('dict_content', 'video_type', toInt64(content_id), 'unknown') AS video_type,
+    dictGetOrDefault('dict_content', 'category', toInt64(content_id), 'unknown') AS category,
+    dictGetOrDefault('dict_content', 'show_name', toInt64(content_id), 'unknown') AS show_name,
     now64(3) AS ingest_ts
 FROM raw_events_ingest;

@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS fact_concurrency_stats
     platform         LowCardinality(String),
     country          LowCardinality(String),
     video_resolution LowCardinality(String) DEFAULT 'unknown',
-    content_id       UInt64,
+    content_id       Int64,
     active_sessions  Int32,
     open_sessions    Int32,
     active_users     AggregateFunction(uniq, String),
@@ -44,10 +44,10 @@ active_minutes AS (
     SELECT
         video_session_id, user_id, platform, country, video_resolution, content_id,
         arrayJoin(arrayMap(x -> run_start + toIntervalMinute(x),
-            range(toUInt32(greatest(dateDiff('minute', run_start, run_end), 1)))
+            range(toUInt32(least(greatest(dateDiff('minute', run_start, run_end), 1), 10000)))
         )) AS minute
     FROM active_runs
-    WHERE run_end > run_start
+    WHERE run_end > run_start AND dateDiff('minute', run_start, run_end) < 10000
 ),
 
 open_runs AS (
@@ -67,10 +67,10 @@ open_minutes AS (
     SELECT
         video_session_id, user_id, platform, country, video_resolution, content_id,
         arrayJoin(arrayMap(x -> run_start + toIntervalMinute(x),
-            range(toUInt32(greatest(dateDiff('minute', run_start, run_end), 1)))
+            range(toUInt32(least(greatest(dateDiff('minute', run_start, run_end), 1), 10000)))
         )) AS minute
     FROM open_runs
-    WHERE run_end > run_start
+    WHERE run_end > run_start AND dateDiff('minute', run_start, run_end) < 10000
 )
 
 SELECT
@@ -88,4 +88,5 @@ FROM active_minutes a
 FULL OUTER JOIN open_minutes o
     ON a.video_session_id = o.video_session_id
    AND a.minute = o.minute
-GROUP BY minute, platform, country, video_resolution, content_id;
+GROUP BY minute, platform, country, video_resolution, content_id
+SETTINGS max_memory_usage = 40000000000;
