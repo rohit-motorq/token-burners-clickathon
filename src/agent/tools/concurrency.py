@@ -22,7 +22,7 @@ _GRAIN_EXPR = {
 }
 
 _DIM_COLUMNS = ("platform", "country", "video_resolution")
-_DICT_DIM_COLUMNS = ("video_type", "category")
+_DICT_DIM_COLUMNS = ("video_type", "category", "show_name", "title")
 
 
 def _dim_where_clause(dims: dict, params: dict) -> str:

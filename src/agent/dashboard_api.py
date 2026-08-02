@@ -40,9 +40,10 @@ router = APIRouter(prefix="/api")
 
 
 def _dims_from_query(platform=None, country=None, video_type=None, category=None,
-                      content_id=None, video_resolution=None) -> dict:
+                      content_id=None, video_resolution=None, show_name=None, title=None) -> dict:
     raw = {"platform": platform, "country": country, "video_type": video_type,
-           "category": category, "content_id": content_id, "video_resolution": video_resolution}
+           "category": category, "content_id": content_id, "video_resolution": video_resolution,
+           "show_name": show_name, "title": title}
     return {k: v for k, v in raw.items() if v is not None}
 
 
@@ -61,7 +62,7 @@ def _deltas_where(dims: dict, params: dict, start: str, end: str, only_starts: b
         if dims.get(col):
             clauses.append(f"{col} = {{{col}:String}}")
             params[col] = dims[col]
-    for col in ("video_type", "category"):
+    for col in ("video_type", "category", "show_name", "title"):
         if dims.get(col):
             clauses.append(f"dictGet('dict_content', '{col}', content_id) = {{{col}:String}}")
             params[col] = dims[col]
@@ -83,9 +84,12 @@ def meta():
         FROM fact_concurrency_deltas
     """)[0]
     content_dims = ch_client.query("""
-        SELECT groupUniqArray(video_type) AS video_types, groupUniqArray(category) AS categories
+        SELECT groupUniqArray(video_type) AS video_types, groupUniqArray(category) AS categories,
+               groupUniqArray(show_name) AS show_names
         FROM dim_content
     """)[0]
+    # title is excluded here (12k+ distinct values, not dropdown-able) — the
+    # UI takes it as free-text instead of a populated <select>.
     return {**bounds, **dims, **content_dims}
 
 
@@ -93,11 +97,12 @@ def meta():
 def concurrency_curve(start: str, end: str, grain: str = "minute",
                        platform: str | None = None, country: str | None = None,
                        video_type: str | None = None, category: str | None = None,
-                       content_id: int | None = None, video_resolution: str | None = None):
+                       content_id: int | None = None, video_resolution: str | None = None,
+                       show_name: str | None = None, title: str | None = None):
     """Powers both the live concurrency chart and the replay slider — replay
     is this same curve fetched once for the chosen window; the client
     animates through the points itself rather than the backend streaming."""
-    dims = _dims_from_query(platform, country, video_type, category, content_id, video_resolution)
+    dims = _dims_from_query(platform, country, video_type, category, content_id, video_resolution, show_name, title)
     curve = concurrency.get_concurrency_curve(dims, start, end, grain)
     # See /kpis — FINAL fixed the underlying dedup issue, this is now just a
     # defensive floor, not a workaround for a known-broken query.
@@ -110,8 +115,9 @@ def concurrency_curve(start: str, end: str, grain: str = "minute",
 @router.get("/kpis")
 def kpis(start: str, end: str, platform: str | None = None, country: str | None = None,
          video_type: str | None = None, category: str | None = None,
-         content_id: int | None = None, video_resolution: str | None = None):
-    dims = _dims_from_query(platform, country, video_type, category, content_id, video_resolution)
+         content_id: int | None = None, video_resolution: str | None = None,
+         show_name: str | None = None, title: str | None = None):
+    dims = _dims_from_query(platform, country, video_type, category, content_id, video_resolution, show_name, title)
     # get_concurrency_curve now reads fact_concurrency_deltas FINAL, which
     # fixed the actual cause of transient negative concurrency (unmerged
     # ReplacingMergeTree duplicates). Clamp stays as a defensive floor, not
@@ -130,7 +136,7 @@ def kpis(start: str, end: str, platform: str | None = None, country: str | None 
     watch_where = ["session_start >= {start:DateTime64(3,'UTC')} AND session_start < {end:DateTime64(3,'UTC')}"]
     # fact_events carries video_type/category/platform/country as direct
     # columns (unlike fact_concurrency_deltas/stats) — no dictGet needed here.
-    for col in ("platform", "country", "video_type", "category"):
+    for col in ("platform", "country", "video_type", "category", "show_name", "title"):
         if dims.get(col):
             watch_where.append(f"{col} = {{{col}:String}}")
             watch_params[col] = dims[col]
@@ -167,12 +173,12 @@ _TIME_GRAIN_EXPR = {
     "hour": "toHour(minute)",  # 0..23, hour-of-day
     "day": "toDate(minute)",  # actual calendar date
 }
-_SPLIT_DIMS = ("country", "platform", "video_resolution", "video_type", "category")
+_SPLIT_DIMS = ("country", "platform", "video_resolution", "video_type", "category", "show_name", "title")
 _MAX_SPLIT_SERIES = 8  # cap distinct series (category has ~80 opaque values); rest collapse into "Other"
 
 
 def _split_expr(split_by: str) -> str:
-    if split_by in ("video_type", "category"):
+    if split_by in ("video_type", "category", "show_name", "title"):
         return f"dictGet('dict_content', '{split_by}', content_id)"
     return split_by  # country / platform / video_resolution: direct columns
 
@@ -181,13 +187,13 @@ def _split_expr(split_by: str) -> str:
 def traffic(start: str, end: str, grain: str = "hour", split_by: str | None = None,
             platform: str | None = None, country: str | None = None,
             video_type: str | None = None, category: str | None = None,
-            content_id: int | None = None):
+            content_id: int | None = None, show_name: str | None = None, title: str | None = None):
     """Traffic chart: `grain` picks the time axis (minute-of-day, hour-of-day,
     or actual calendar day), `split_by` optionally breaks each bucket down by
-    a dimension (country/platform/video_resolution/video_type/category) —
+    a dimension (country/platform/video_resolution/video_type/category/show_name/title) —
     the two combine into one query, e.g. "sessions per hour of day, split by
     platform". Without split_by, returns a single "value" series."""
-    dims = _dims_from_query(platform, country, video_type, category, content_id)
+    dims = _dims_from_query(platform, country, video_type, category, content_id, show_name=show_name, title=title)
     bucket_expr = _TIME_GRAIN_EXPR.get(grain, _TIME_GRAIN_EXPR["hour"])
     params: dict = {}
     where = _deltas_where(dims, params, start, end)
@@ -236,8 +242,9 @@ def traffic(start: str, end: str, grain: str = "hour", split_by: str | None = No
 
 @router.get("/geo")
 def geo(start: str, end: str, platform: str | None = None,
-        video_type: str | None = None, category: str | None = None):
-    dims = _dims_from_query(platform, None, video_type, category)
+        video_type: str | None = None, category: str | None = None,
+        show_name: str | None = None, title: str | None = None):
+    dims = _dims_from_query(platform, None, video_type, category, show_name=show_name, title=title)
     params: dict = {}
     where = _deltas_where(dims, params, start, end)
     return ch_client.query(f"""

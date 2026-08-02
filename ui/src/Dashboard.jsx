@@ -272,6 +272,8 @@ const TRAFFIC_SPLITS = [
   { key: "video_resolution", label: "Resolution" },
   { key: "video_type", label: "Video type" },
   { key: "category", label: "Category" },
+  { key: "show_name", label: "Show name" },
+  { key: "title", label: "Title" },
 ];
 
 function minuteOfDayLabel(v) {
@@ -283,7 +285,7 @@ function minuteOfDayLabel(v) {
 function TrafficByDimension({ meta, card, sectionHead }) {
   const [grain, setGrain] = useState("hour");
   const [splitBy, setSplitBy] = useState("");
-  const [filters, setFilters] = useState({ platform: "", country: "", video_type: "", category: "" });
+  const [filters, setFilters] = useState({ platform: "", country: "", video_type: "", category: "", show_name: "", title: "" });
   const [result, setResult] = useState({ series: ["value"], rows: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -304,7 +306,7 @@ function TrafficByDimension({ meta, card, sectionHead }) {
       setResult({ series: ["value"], rows: [] });
     }
     setLoading(false);
-  }, [bounds?.start, bounds?.end, grain, splitBy, filters.platform, filters.country, filters.video_type, filters.category]);
+  }, [bounds?.start, bounds?.end, grain, splitBy, filters.platform, filters.country, filters.video_type, filters.category, filters.show_name, filters.title]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -330,7 +332,7 @@ function TrafficByDimension({ meta, card, sectionHead }) {
       <div style={sectionHead}>
         <Clock size={14} />
         <span>Traffic</span>
-        <InfoHint text="Session volume (count of session starts), not concurrency — a busy hour here doesn't mean high concurrent viewership, just many sessions began. Minute/hour-of-day buckets are a repeating pattern averaged across every day in range; Day is real calendar dates. Dimension breakdowns cap at the top 8 values by volume, the rest collapse into 'Other'." />
+        <InfoHint text="Session volume (count of session starts), not concurrency — a busy hour here doesn't mean high concurrent viewership, just many sessions began. Minute/hour-of-day buckets are a repeating pattern averaged across every day in range; Day is real calendar dates. Dimension breakdowns cap at the top 8 values by volume, the rest collapse into 'Other'. Title filters/splits match the exact title string (no partial match)." />
         <span style={{ fontSize: 11, color: C.textM, fontWeight: 400, marginLeft: 4 }}>
           Across all stored history · combine a time axis with a dimension breakdown
         </span>
@@ -364,6 +366,12 @@ function TrafficByDimension({ meta, card, sectionHead }) {
               <option value="">All categories</option>
               {(meta?.categories || []).map(c => <option key={c} value={c}>{c}</option>)}
             </select>
+            <select style={selectStyle} value={filters.show_name} onChange={e => setFilters(f => ({ ...f, show_name: e.target.value }))}>
+              <option value="">All shows</option>
+              {(meta?.show_names || []).map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <input style={{ ...selectStyle, width: 120 }} placeholder="Exact title…" value={filters.title}
+              onChange={e => setFilters(f => ({ ...f, title: e.target.value }))} />
           </div>
         </div>
 
