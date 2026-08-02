@@ -33,6 +33,42 @@ def _reference_now() -> str | None:
     mx = rows[0]["mx"] if rows and rows[0].get("mx") else None
     return mx.split(".")[0] if mx else None
 
+
+def _known_dim_values() -> str | None:
+    """Real distinct platform/video_type/country values, queried fresh every
+    request rather than hardcoded — confirmed bug: the model guesses
+    plausible-but-wrong literal values ("Android" instead of ANDROID_PHONE,
+    "sports" as a category that doesn't exist anywhere), and every dim filter
+    silently returns zero rows. Querying live also means this stays correct
+    against the unseen-day dataset, which may have different values, rather
+    than going stale against a snapshot taken during development.
+
+    category is deliberately NOT enumerated here: 84 distinct values, all
+    opaque codes (e.g. "cdbgg"), not human-readable, and too many to list
+    cheaply in every prompt — the model is told to treat category as opaque
+    and look a specific content's category up via get_content_metadata
+    rather than guess a value for it."""
+    platforms = ch_client.query("SELECT DISTINCT platform FROM cc_delta_content")
+    video_types = ch_client.query("SELECT DISTINCT video_type FROM cc_delta_content")
+    countries = ch_client.query("SELECT DISTINCT country FROM cc_delta_content")
+    if not platforms:
+        return None
+    platform_list = ", ".join(r["platform"] for r in platforms)
+    video_type_list = ", ".join(repr(r["video_type"]) for r in video_types)
+    country_list = ", ".join(r["country"] for r in countries)
+    return (
+        f"Valid platform values in this dataset: {platform_list}. "
+        f"Valid video_type values: {video_type_list}. "
+        f"Valid country values: {country_list}. "
+        "Only ever filter using an exact value from these lists — never guess "
+        "a plausible-sounding one (e.g. never use \"Android\" or \"sports\"), "
+        "since anything else silently returns no data. category is a separate, "
+        "opaque internal code (not a genre name) — do not guess a category "
+        "value; look up a specific content's category via get_content_metadata "
+        "if you need it."
+    )
+
+
 _DIM_PARAMS = {
     "platform": {"type": "string"},
     "country": {"type": "string"},
@@ -243,6 +279,9 @@ def answer(question: str, _trace: list | None = None,
                 "\"last N minutes\" relative to THIS timestamp, never the real-world "
                 "calendar date."
             )
+        known_dims = _known_dim_values()
+        if known_dims:
+            system += "\n\n" + known_dims
 
         # render_chart's actual base64 markdown is attached here, out of band —
         # never sent back to the model as a tool_result to copy. A ~40-80KB
