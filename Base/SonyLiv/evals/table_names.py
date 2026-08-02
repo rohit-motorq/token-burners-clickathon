@@ -21,7 +21,7 @@ EVENTS_INGEST = "events_ingest"                # 001 — Null engine ingestion e
 CONTENT_DIM_IMPL = "content_dim"               # 002 — pipeline's own ReplacingMergeTree, not the raw seed table
 EVENTS_RAW_IMPL = "events_raw"                 # 003 — pipeline's own enriched copy with ingest_ts
 CC_DELTA_RAW = "cc_delta_raw"                  # 004 — Null engine intermediate fold output
-CC_DELTA_CONTENT = "cc_delta_content"          # 005 — per-content minute deltas (SummingMergeTree)
+CC_DELTA_CONTENT = "cc_delta"                  # 005 — per-content minute deltas (ReplacingMergeTree in v4)
 SESSION_ACTIVE = "session_active"              # 006 — replaces session_state; is_active flag, no fg/playing/ended
 PIPELINE_CHECKPOINT = "pipeline_checkpoint"    # 007 — replaces pipeline_cursor
 

@@ -1,0 +1,2 @@
+mcp>=1.2,<2.0  # v2.0 renamed FastMCP -> MCPServer under mcp.server.mcpserver; pin to the documented 1.x API
+-r ../agent/requirements.txt

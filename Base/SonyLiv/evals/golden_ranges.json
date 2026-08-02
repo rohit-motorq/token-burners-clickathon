@@ -55,10 +55,10 @@
     "start_ts_ms": 1785061800000,
     "end_ts_ms": 1785062400000,
     "filters": {},
-    "peak_concurrency": 1484,
-    "avg_concurrency": 826.591,
-    "distinct_active_sessions": 2452,
-    "distinct_active_users": 2335
+    "peak_concurrency": 1485,
+    "avg_concurrency": 826.995,
+    "distinct_active_sessions": 2453,
+    "distinct_active_users": 2336
   },
   {
     "range_name": "ramp_up",
@@ -69,7 +69,7 @@
       "platform": "ANDROID_PHONE"
     },
     "peak_concurrency": 927,
-    "avg_concurrency": 529.571,
+    "avg_concurrency": 529.572,
     "distinct_active_sessions": 1480,
     "distinct_active_users": 1450
   },
@@ -81,10 +81,10 @@
     "filters": {
       "platform": "IPHONE"
     },
-    "peak_concurrency": 204,
-    "avg_concurrency": 107.529,
-    "distinct_active_sessions": 350,
-    "distinct_active_users": 335
+    "peak_concurrency": 205,
+    "avg_concurrency": 107.933,
+    "distinct_active_sessions": 351,
+    "distinct_active_users": 336
   },
   {
     "range_name": "ramp_up",
@@ -106,9 +106,9 @@
     "end_ts_ms": 1785064020000,
     "filters": {},
     "peak_concurrency": 2298,
-    "avg_concurrency": 2168.69,
-    "distinct_active_sessions": 6516,
-    "distinct_active_users": 6026
+    "avg_concurrency": 2168.806,
+    "distinct_active_sessions": 6517,
+    "distinct_active_users": 6027
   },
   {
     "range_name": "sustained_peak",
@@ -119,7 +119,7 @@
       "platform": "ANDROID_PHONE"
     },
     "peak_concurrency": 1457,
-    "avg_concurrency": 1366.916,
+    "avg_concurrency": 1366.917,
     "distinct_active_sessions": 3919,
     "distinct_active_users": 3744
   },
@@ -132,9 +132,9 @@
       "platform": "IPHONE"
     },
     "peak_concurrency": 263,
-    "avg_concurrency": 237.318,
-    "distinct_active_sessions": 892,
-    "distinct_active_users": 793
+    "avg_concurrency": 237.432,
+    "distinct_active_sessions": 893,
+    "distinct_active_users": 794
   },
   {
     "range_name": "sustained_peak",
@@ -156,7 +156,7 @@
     "end_ts_ms": 1785063360000,
     "filters": {},
     "peak_concurrency": 2297,
-    "avg_concurrency": 2280.512,
+    "avg_concurrency": 2280.514,
     "distinct_active_sessions": 2676,
     "distinct_active_users": 2604
   },
@@ -169,7 +169,7 @@
       "platform": "ANDROID_PHONE"
     },
     "peak_concurrency": 1457,
-    "avg_concurrency": 1445.93,
+    "avg_concurrency": 1445.931,
     "distinct_active_sessions": 1681,
     "distinct_active_users": 1672
   },
@@ -195,7 +195,7 @@
       "video_type": "live"
     },
     "peak_concurrency": 322,
-    "avg_concurrency": 315.056,
+    "avg_concurrency": 315.057,
     "distinct_active_sessions": 389,
     "distinct_active_users": 388
   },
@@ -205,10 +205,10 @@
     "start_ts_ms": 1785064200000,
     "end_ts_ms": 1785065400000,
     "filters": {},
-    "peak_concurrency": 1910,
-    "avg_concurrency": 1087.225,
-    "distinct_active_sessions": 4426,
-    "distinct_active_users": 4166
+    "peak_concurrency": 1911,
+    "avg_concurrency": 1087.303,
+    "distinct_active_sessions": 4427,
+    "distinct_active_users": 4167
   },
   {
     "range_name": "ramp_down",
@@ -219,7 +219,7 @@
       "platform": "ANDROID_PHONE"
     },
     "peak_concurrency": 1198,
-    "avg_concurrency": 685.777,
+    "avg_concurrency": 685.778,
     "distinct_active_sessions": 2696,
     "distinct_active_users": 2630
   },
@@ -232,7 +232,7 @@
       "platform": "IPHONE"
     },
     "peak_concurrency": 211,
-    "avg_concurrency": 119.953,
+    "avg_concurrency": 119.955,
     "distinct_active_sessions": 592,
     "distinct_active_users": 549
   },
@@ -245,7 +245,7 @@
       "video_type": "live"
     },
     "peak_concurrency": 205,
-    "avg_concurrency": 132.828,
+    "avg_concurrency": 132.829,
     "distinct_active_sessions": 1069,
     "distinct_active_users": 1021
   },
@@ -256,9 +256,9 @@
     "end_ts_ms": 1785063600000,
     "filters": {},
     "peak_concurrency": 2298,
-    "avg_concurrency": 854.406,
-    "distinct_active_sessions": 6754,
-    "distinct_active_users": 6236
+    "avg_concurrency": 854.544,
+    "distinct_active_sessions": 6756,
+    "distinct_active_users": 6238
   },
   {
     "range_name": "full_event_hour",
@@ -269,7 +269,7 @@
       "platform": "ANDROID_PHONE"
     },
     "peak_concurrency": 1457,
-    "avg_concurrency": 551.872,
+    "avg_concurrency": 551.873,
     "distinct_active_sessions": 3994,
     "distinct_active_users": 3802
   },
@@ -282,9 +282,9 @@
       "platform": "IPHONE"
     },
     "peak_concurrency": 263,
-    "avg_concurrency": 97.281,
-    "distinct_active_sessions": 958,
-    "distinct_active_users": 855
+    "avg_concurrency": 97.418,
+    "distinct_active_sessions": 960,
+    "distinct_active_users": 857
   },
   {
     "range_name": "full_event_hour",
@@ -295,7 +295,7 @@
       "video_type": "live"
     },
     "peak_concurrency": 356,
-    "avg_concurrency": 131.496,
+    "avg_concurrency": 131.507,
     "distinct_active_sessions": 1417,
     "distinct_active_users": 1355
   },
@@ -306,9 +306,9 @@
     "end_ts_ms": 1785110400000,
     "filters": {},
     "peak_concurrency": 2298,
-    "avg_concurrency": 69.576,
-    "distinct_active_sessions": 10502,
-    "distinct_active_users": 9331
+    "avg_concurrency": 69.584,
+    "distinct_active_sessions": 10504,
+    "distinct_active_users": 9333
   },
   {
     "range_name": "full_event_day",
@@ -332,9 +332,9 @@
       "platform": "IPHONE"
     },
     "peak_concurrency": 263,
-    "avg_concurrency": 7.51,
-    "distinct_active_sessions": 1485,
-    "distinct_active_users": 1249
+    "avg_concurrency": 7.517,
+    "distinct_active_sessions": 1487,
+    "distinct_active_users": 1251
   },
   {
     "range_name": "full_event_day",

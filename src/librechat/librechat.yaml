@@ -1,0 +1,46 @@
+# LibreChat config for the SonyLIV concurrency agent.
+#
+# Two ways in, both point at the same tool logic (src/agent/tools/*) — see
+# src/agent/INNER_CONTEXT.md for why the agent never exposes raw SQL either way:
+#
+# 1. `endpoints.custom` — primary path. Routes chat straight to src/agent/server.py's
+#    OpenAI-compatible /v1/chat/completions, which runs router -> genre-scoped
+#    tools -> Langfuse trace internally. This is the one with tracing/eval.
+# 2. `mcpServers` — secondary/bonus path. LibreChat's own model calls the typed
+#    tools directly over MCP (src/mcp_server/server.py). No Langfuse wrapping on
+#    this path since it bypasses agent.py's loop — useful as a "this is also a
+#    standard MCP tool server" demo, not the primary integration.
+
+version: 1.2.1
+
+# LibreChat's own SSRF protection (separate from the MCP server's transport_security
+# in src/mcp_server/server.py) blocks any MCP server URL that isn't explicitly
+# allowlisted here — host.docker.internal gets rejected with "Domain ... is not
+# allowed" otherwise, even though the request originates from the same machine.
+mcpSettings:
+  allowedDomains:
+    - host.docker.internal
+
+endpoints:
+  custom:
+    - name: "SonyLIV Concurrency Agent"
+      # src/agent/server.py never validates this — a fixed placeholder avoids
+      # LibreChat prompting the user for a key before it'll send requests.
+      apiKey: "not-needed"
+      # host.docker.internal resolves to the host machine from inside LibreChat's
+      # docker container on Mac/Windows Docker Desktop. On Linux, either add
+      #   extra_hosts: ["host.docker.internal:host-gateway"]
+      # to LibreChat's own docker-compose service, or run the agent service in
+      # the same compose network and use its service name instead of this host.
+      baseURL: "http://host.docker.internal:8000/v1"
+      models:
+        default: ["concurrency-agent"]
+        fetch: false
+      titleConvo: true
+      summarize: false
+
+mcpServers:
+  sonyliv-concurrency:
+    type: sse
+    # src/mcp_server/server.py — run with: python -m src.mcp_server.server
+    url: "http://host.docker.internal:8811/sse"

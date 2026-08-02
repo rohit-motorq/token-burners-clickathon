@@ -37,7 +37,7 @@ RESUME_EVENT = "resume"
 PAUSE_EVENT = "pause"
 FG_ON = "AppForegrounded"
 FG_OFF = "AppBackgrounded"
-END_TYPES = {"VideoSessionEnd", "VideoError"}
+END_TYPES = {"VideoSessionEnd"}
 
 
 def fetch_events():
